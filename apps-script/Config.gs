@@ -31,12 +31,13 @@ const CONFIG = {
 
   // --- Cómo se detecta un "Ticket re-asignado a otro dep. CCH / COACH" ---
   // Siempre: cuando el caso pasa de un agente del equipo a un usuario/equipo de Help Scout
-  // que NO está en AGENTES.
+  // que NO está en AGENTES (así lo hace el equipo SOP: asignándolo a otra persona).
   // Además, si llenas esta lista con los IDs de los buzones del equipo SOP (ver hoja
   // HS_Usuarios), mover el caso a un buzón que no esté aquí también cuenta como re-asignado.
   MAILBOXES_EQUIPO: [],
   // Además, si el caso tiene alguna de estas etiquetas (tags) de Help Scout, cuenta como re-asignado.
-  TAGS_REASIGNACION: ['cch', 'coach'],
+  // Vacío porque el equipo re-asigna asignando a otra persona (ej. ['cch', 'coach'] si algún día usan tags).
+  TAGS_REASIGNACION: [],
   // true: pasar un caso de un agente del equipo a OTRO agente del equipo también cuenta como
   // re-asignado para el agente que lo tenía (así no le queda como pendiente).
   TRANSFERENCIA_INTERNA_ES_REASIGNACION: true,

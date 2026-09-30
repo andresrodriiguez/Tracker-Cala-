@@ -20,7 +20,7 @@ Help Scout (API v2) ──cada 15 min──►  Apps Script  ──►  Hoja del
 | **Tickets sin atender al iniciar la jornada** (C) | "Foto" diaria a la `HORA_INICIO_JORNADA`: casos en estado *Active* asignados al agente. |
 | **Tickets asignados en el día** (D) | Casos que quedaron asignados al agente ese día, ya sea que los asigne el líder o que el agente los tome. |
 | **Nueva consulta en ticket ya asignado** (E) | El cliente volvió a escribir en un caso que el agente tenía desde un día anterior y que ya había respondido, dejado en *Pending* o cerrado. Cuenta máximo 1 por caso por día. |
-| **Ticket re-asignados a otro dep. CCH / COACH** (F) | El caso pasó del agente a un usuario o equipo de Help Scout que **no** es del equipo SOP, o se movió a un buzón de otro departamento, o tiene la etiqueta `cch`/`coach`. Pasarlo a otro compañero del equipo también cuenta, porque así no le queda pendiente (se puede desactivar). |
+| **Ticket re-asignados a otro dep. CCH / COACH** (F) | El caso pasó del agente a un usuario o equipo de Help Scout que **no** es del equipo SOP, o se movió a un buzón de otro departamento, o tiene una etiqueta configurada. Pasarlo a otro compañero del equipo también cuenta, porque así no le queda pendiente (se puede desactivar). |
 | **Total Tickets Gestionados (Auto)** (G) | **No se toca**: sigue siendo tu fórmula. |
 | **Tickets Cerrados** (H) | Casos que pasaron a *Closed* estando a cargo del agente. |
 | **Tickets Pendientes/Seguimiento** (I) | `C + D + E − F − H` (mínimo 0). |
@@ -59,6 +59,9 @@ El tracker hoy es un archivo **.xlsx** abierto en Drive, y Apps Script no funcio
 
 > Alternativa para desarrolladores: con [clasp](https://github.com/google/clasp), crea `.clasp.json` con `"rootDir": "apps-script"` y el `scriptId` de la hoja, y luego ejecuta `clasp push`.
 
+> La zona horaria de la hoja debe ser la del equipo (**Archivo → Configuración**). Ya está en
+> **America/New_York (Miami)**: con ella se decide a qué día pertenece cada ticket y a qué hora se toma la foto de inicio de jornada.
+
 ### 4. Configurar `Config.gs`
 - **AGENTES**: nombre **exactamente** como aparece en la columna "Nombre del Agente" y su **email de Help Scout**.
 - **FECHA_INICIO**: desde qué día llena la automatización.
@@ -79,9 +82,9 @@ Según cómo lo hagan en Help Scout, ajusta `Config.gs`:
 
 | Si los pasan… | Configura |
 |---|---|
-| Asignándolos a un usuario o **Team** de CCH/COACH | Nada: ya funciona, porque ese usuario no está en `AGENTES`. |
+| Asignándolos a un usuario o **Team** de CCH/COACH (**así lo hace hoy el equipo SOP**) | Nada: ya funciona, porque ese usuario no está en `AGENTES`. |
 | **Moviéndolos a otro buzón** | Pon en `MAILBOXES_EQUIPO` los IDs de los buzones del equipo SOP (están en la hoja `HS_Usuarios`). |
-| Poniéndoles una **etiqueta** | Pon las etiquetas en `TAGS_REASIGNACION` (por defecto `cch`, `coach`). |
+| Poniéndoles una **etiqueta** | Pon las etiquetas en `TAGS_REASIGNACION` (ej. `['cch', 'coach']`). |
 
 ## Preguntas frecuentes
 
