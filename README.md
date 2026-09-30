@@ -52,18 +52,18 @@ El tracker hoy es un archivo **.xlsx** abierto en Drive, y Apps Script no funcio
 > La app ve lo mismo que el usuario que la crea. Créala con un usuario administrador o que tenga acceso a todos los buzones del equipo.
 
 ### 3. Pegar el código en la hoja
-1. En la hoja convertida: **Extensiones → Apps Script**.
-2. Crea un archivo por cada `.gs` de la carpeta [`apps-script/`](apps-script) con el mismo nombre (`Config`, `Util`, `Eventos`, `Metricas`, `HelpScout`, `Sync`, `Tracker`, `Resumen`, `Menu`) y pega su contenido.
-3. En **Configuración del proyecto (⚙️)** activa *"Mostrar el archivo de manifiesto appsscript.json"* y reemplaza su contenido por [`apps-script/appsscript.json`](apps-script/appsscript.json).
-4. Guarda.
+1. En la hoja: **Extensiones → Apps Script**.
+2. Abre [`dist/Codigo.gs`](dist/Codigo.gs) (todo el código en un solo archivo), cópialo completo y **reemplaza** el contenido de `Código.gs` en el editor.
+3. En **Configuración del proyecto (⚙️)** activa *"Mostrar el archivo de manifiesto appsscript.json"*, vuelve al editor y reemplaza el contenido de `appsscript.json` por el de [`apps-script/appsscript.json`](apps-script/appsscript.json).
+4. Guarda (💾).
 
 > Alternativa para desarrolladores: con [clasp](https://github.com/google/clasp), crea `.clasp.json` con `"rootDir": "apps-script"` y el `scriptId` de la hoja, y luego ejecuta `clasp push`.
 
 > La zona horaria de la hoja debe ser la del equipo (**Archivo → Configuración**). Ya está en
 > **America/New_York (Miami)**: con ella se decide a qué día pertenece cada ticket y a qué hora se toma la foto de inicio de jornada.
 
-### 4. Configurar `Config.gs`
-- **AGENTES**: nombre **exactamente** como aparece en la columna "Nombre del Agente" y su **email de Help Scout**.
+### 4. Configurar (sección `CONFIG` al inicio del código)
+- **AGENTES**: nombre como aparece en la columna "Nombre del Agente" y su **email de Help Scout** (ya configurados para Jaideth, Maryelin, Edna y Andrés).
 - **FECHA_INICIO**: desde qué día llena la automatización.
 - **HORA_INICIO_JORNADA**: hora de la foto de "sin atender".
 - **Re-asignaciones a CCH / COACH**: ver la sección [¿Cómo pasan los casos a CCH / COACH?](#cómo-pasan-los-casos-a-cch--coach).
@@ -96,8 +96,11 @@ Según cómo lo hagan en Help Scout, ajusta `Config.gs`:
 
 ## Desarrollo
 
-La lógica que interpreta el historial de Help Scout (`Eventos.gs`, `Metricas.gs`, `Util.gs`) es JavaScript puro y tiene pruebas:
+El código fuente está separado por archivos en [`apps-script/`](apps-script). `dist/Codigo.gs` se genera a partir de ellos,
+así que después de cualquier cambio hay que regenerarlo. La lógica que interpreta el historial de Help Scout
+(`Eventos.gs`, `Metricas.gs`, `Util.gs`) es JavaScript puro y tiene pruebas:
 
 ```bash
-npm test
+npm test        # pruebas
+npm run build   # regenera dist/Codigo.gs
 ```

@@ -8,10 +8,10 @@ const CONFIG = {
   // Si dejas el email vacío se busca al usuario de Help Scout por nombre + apellido.
   // (Opcional) "id": ID numérico del usuario en Help Scout (ver hoja HS_Usuarios).
   AGENTES: [
-    { nombre: 'Jaideth Andocilla', email: '' },
-    { nombre: 'Maryelin Rios', email: '' },
-    { nombre: 'Edna Escudero', email: '' },
-    { nombre: 'Andrés Rodríguez', email: '' },
+    { nombre: 'Jaideth Andocilla', email: 'jaideth.andocilla@calapresenta.com' },
+    { nombre: 'Maryelin Rios', email: 'maryelin.rios@calapresenta.com' },
+    { nombre: 'Edna Escudero', email: 'edna@calapresenta.com' },
+    { nombre: 'Andrés Rodríguez', email: 'andres.rodriguez@calapresenta.com' },
   ],
 
   // Desde este día (yyyy-MM-dd) la automatización llena el tracker.
