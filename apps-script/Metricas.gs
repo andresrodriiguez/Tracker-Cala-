@@ -31,10 +31,10 @@ function colorSemaforo(ratio, umbrales) {
   return 'ROJO';
 }
 
-/** Estadísticas de una lista de minutos → horas. */
-function estadisticasTiempo(minutos) {
+/** Estadísticas de una lista de minutos → horas; pctEnMeta = % de valores ≤ metaHoras. */
+function estadisticasTiempo(minutos, metaHoras) {
   const v = minutos.filter(m => typeof m === 'number' && !isNaN(m)).sort((a, b) => a - b);
-  if (!v.length) return { n: 0, promedioH: null, medianaH: null, pctMenos24h: null };
+  if (!v.length) return { n: 0, promedioH: null, medianaH: null, pctEnMeta: null };
   const mitad = Math.floor(v.length / 2);
   const mediana = v.length % 2 ? v[mitad] : (v[mitad - 1] + v[mitad]) / 2;
   const promedio = v.reduce((s, m) => s + m, 0) / v.length;
@@ -42,6 +42,6 @@ function estadisticasTiempo(minutos) {
     n: v.length,
     promedioH: Math.round(promedio / 60 * 10) / 10,
     medianaH: Math.round(mediana / 60 * 10) / 10,
-    pctMenos24h: v.filter(m => m < 24 * 60).length / v.length,
+    pctEnMeta: metaHoras == null ? null : v.filter(m => m <= metaHoras * 60).length / v.length,
   };
 }

@@ -30,6 +30,28 @@ function diaDesdeCelda(valor, formatearDia) {
   return null;
 }
 
+/**
+ * Minutos entre dos momentos contando solo el horario laboral.
+ * inicioLocal/finLocal son Date cuyos campos UTC representan la hora LOCAL (reloj de pared),
+ * así el cálculo no depende de la zona horaria ni de los cambios de horario de verano.
+ * @param {{inicio: number, fin: number, dias: number[]}} horario  horas 0-24 y días 0=domingo…6=sábado
+ */
+function minutosHabiles(inicioLocal, finLocal, horario) {
+  const ini = inicioLocal.getTime();
+  const fin = finLocal.getTime();
+  if (!(fin > ini)) return 0;
+  const DIA = 86400000;
+  const HORA = 3600000;
+  let total = 0;
+  for (let d = Math.floor(ini / DIA) * DIA; d < fin; d += DIA) {
+    if (horario.dias.indexOf(new Date(d).getUTCDay()) < 0) continue;
+    const desde = Math.max(d + horario.inicio * HORA, ini);
+    const hasta = Math.min(d + horario.fin * HORA, fin);
+    if (hasta > desde) total += hasta - desde;
+  }
+  return total / 60000;
+}
+
 /** 'A' → 1, 'L' → 12, 'AA' → 27 */
 function indiceColumna(letra) {
   return String(letra).toUpperCase().split('').reduce((n, c) => n * 26 + c.charCodeAt(0) - 64, 0);

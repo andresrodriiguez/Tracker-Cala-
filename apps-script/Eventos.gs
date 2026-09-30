@@ -17,6 +17,7 @@
  *   mailboxesEquipo  → number[]
  *   tagsReasignacion → string[]
  *   transferenciaInternaEsReasignacion → boolean
+ *   minutos(fin, inicio) → (opcional) minutos entre dos Date; por defecto minutos corridos
  * @return {Object[]} eventos
  */
 function derivarEventos(conv, ctx) {
@@ -46,7 +47,7 @@ function derivarEventos(conv, ctx) {
       minutos: minutos == null ? null : Math.max(0, Math.round(minutos)),
     });
   };
-  const minutosEntre = (fin, inicio) => (fin - inicio) / 60000;
+  const minutosEntre = ctx.minutos || ((fin, inicio) => (fin - inicio) / 60000);
   const idUsuario = p => (p && Number(p.id) > 0 ? Number(p.id) : null);
   const agenteDe = id => (id === null ? null : ctx.agentePorId(id));
   const mailboxesEquipo = (ctx.mailboxesEquipo || []).map(Number);

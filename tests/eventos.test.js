@@ -9,7 +9,7 @@ const contexto = vm.createContext({});
 ['Config.gs', 'Util.gs', 'Eventos.gs', 'Metricas.gs'].forEach(archivo => {
   vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'apps-script', archivo), 'utf8'), contexto, { filename: archivo });
 });
-const { derivarEventos, contarDia, colorSemaforo, estadisticasTiempo, diaDesdeCelda, mesDesdeNombreHoja, nombreHojaMes, normalizarTexto } = contexto;
+const { derivarEventos, contarDia, colorSemaforo, estadisticasTiempo, diaDesdeCelda, mesDesdeNombreHoja, nombreHojaMes, normalizarTexto, minutosHabiles } = contexto;
 
 const JAIDETH = { id: 1, nombre: 'Jaideth Andocilla' };
 const EDNA = { id: 2, nombre: 'Edna Escudero' };
@@ -149,10 +149,11 @@ test('semáforo y estadísticas de tiempo', () => {
   assert.equal(colorSemaforo(0.8, u), 'AMARILLO');
   assert.equal(colorSemaforo(0.59, u), 'ROJO');
   assert.equal(colorSemaforo(null, u), null);
-  const s = estadisticasTiempo([60, 120, 3000]);
+  const s = estadisticasTiempo([60, 120, 3000], 8);
   assert.equal(s.medianaH, 2);
   assert.equal(s.promedioH, 17.7);
-  assert.equal(Math.round(s.pctMenos24h * 100), 67);
+  assert.equal(Math.round(s.pctEnMeta * 100), 67);
+  assert.equal(estadisticasTiempo([60]).pctEnMeta, null);
 });
 
 test('utilidades de fechas y nombres de hojas', () => {
@@ -165,4 +166,34 @@ test('utilidades de fechas y nombres de hojas', () => {
   assert.deepEqual({ ...mesDesdeNombreHoja(' Septiembre  2026 ') }, { anio: 2026, mes: 9 });
   assert.equal(mesDesdeNombreHoja('RESUMEN MENSUAL'), null);
   assert.equal(normalizarTexto('Andrés  Rodríguez'), 'andres rodriguez');
+});
+
+// --- Horario laboral: 9:00 a 17:00, lunes a sábado (hora local como campos UTC) ---
+const HORARIO = { inicio: 9, fin: 17, dias: [1, 2, 3, 4, 5, 6] };
+const L = t => new Date(t + 'Z');
+
+test('minutos hábiles: solo cuenta 9:00–17:00 de lunes a sábado', () => {
+  // Mismo día dentro del horario
+  assert.equal(minutosHabiles(L('2026-10-01T10:00:00'), L('2026-10-01T11:30:00'), HORARIO), 90);
+  // Llega jueves 4:50 pm, se resuelve viernes 9:10 am → 10 + 10 = 20 min
+  assert.equal(minutosHabiles(L('2026-10-01T16:50:00'), L('2026-10-02T09:10:00'), HORARIO), 20);
+  // Sábado sí cuenta: sábado 16:00 → lunes 10:00 = 60 (sáb) + 0 (dom) + 60 (lun)
+  assert.equal(minutosHabiles(L('2026-10-03T16:00:00'), L('2026-10-05T10:00:00'), HORARIO), 120);
+  // Todo fuera de horario (noche) → 0
+  assert.equal(minutosHabiles(L('2026-10-01T19:00:00'), L('2026-10-01T21:00:00'), HORARIO), 0);
+  // Domingo no cuenta
+  assert.equal(minutosHabiles(L('2026-10-04T10:00:00'), L('2026-10-04T15:00:00'), HORARIO), 0);
+  // Fin antes que inicio → 0
+  assert.equal(minutosHabiles(L('2026-10-01T11:00:00'), L('2026-10-01T10:00:00'), HORARIO), 0);
+  // Varios días: jueves 9:00 → viernes 17:00 = 2 jornadas de 8 h
+  assert.equal(minutosHabiles(L('2026-10-01T09:00:00'), L('2026-10-02T17:00:00'), HORARIO), 960);
+});
+
+test('los tiempos de los eventos usan horario laboral cuando se configura', () => {
+  const evs = derivarEventos(conv([
+    cliente('2026-10-01T16:40:00Z', { assignedTo: null }),
+    asignar('2026-10-01T16:50:00Z', JAIDETH.id),
+    respuesta('2026-10-02T09:10:00Z', JAIDETH.id, { status: 'closed' }),
+  ]), ctx({ minutos: (fin, inicio) => minutosHabiles(inicio, fin, HORARIO) }));
+  assert.deepEqual(Array.from(evs, e => e.tipo + ':' + e.minutos), ['ASIGNADO:null', 'PRIMERA_RESPUESTA:20', 'CERRADO:20']);
 });

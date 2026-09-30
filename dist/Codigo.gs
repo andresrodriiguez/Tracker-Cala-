@@ -22,9 +22,16 @@ const CONFIG = {
   // Los días anteriores NUNCA se modifican (conservan lo que se llenó a mano).
   FECHA_INICIO: '2026-10-01',
 
-  // Hora (0-23, zona horaria de la hoja) en que se toma la "foto" de tickets sin atender
-  // al iniciar la jornada (columna "Tickets sin atender al iniciar la jornada").
-  HORA_INICIO_JORNADA: 9, // jornada del equipo: 9:00 a 17:00 hora de Miami
+  // Jornada del equipo (zona horaria de la hoja: Miami).
+  //  - A la hora "inicio" se toma la "foto" de tickets sin atender al iniciar la jornada.
+  //  - Los tiempos de respuesta y resolución cuentan SOLO minutos dentro de este horario
+  //    (un caso que llega a las 4:50 pm y se resuelve a las 9:10 am del día hábil siguiente = 20 min).
+  //  - dias: 0 = domingo, 1 = lunes … 6 = sábado.
+  HORARIO_LABORAL: { inicio: 9, fin: 17, dias: [1, 2, 3, 4, 5, 6] },
+
+  // Meta de resolución en horas LABORALES: el resumen muestra el % de casos resueltos dentro de ella.
+  // 8 h laborales = una jornada completa.
+  META_RESOLUCION_HORAS: 8,
 
   // Cada cuántos minutos se sincroniza con Help Scout (1, 5, 10, 15 o 30).
   MINUTOS_ENTRE_SINCRONIZACIONES: 15,
@@ -116,6 +123,28 @@ function diaDesdeCelda(valor, formatearDia) {
   return null;
 }
 
+/**
+ * Minutos entre dos momentos contando solo el horario laboral.
+ * inicioLocal/finLocal son Date cuyos campos UTC representan la hora LOCAL (reloj de pared),
+ * así el cálculo no depende de la zona horaria ni de los cambios de horario de verano.
+ * @param {{inicio: number, fin: number, dias: number[]}} horario  horas 0-24 y días 0=domingo…6=sábado
+ */
+function minutosHabiles(inicioLocal, finLocal, horario) {
+  const ini = inicioLocal.getTime();
+  const fin = finLocal.getTime();
+  if (!(fin > ini)) return 0;
+  const DIA = 86400000;
+  const HORA = 3600000;
+  let total = 0;
+  for (let d = Math.floor(ini / DIA) * DIA; d < fin; d += DIA) {
+    if (horario.dias.indexOf(new Date(d).getUTCDay()) < 0) continue;
+    const desde = Math.max(d + horario.inicio * HORA, ini);
+    const hasta = Math.min(d + horario.fin * HORA, fin);
+    if (hasta > desde) total += hasta - desde;
+  }
+  return total / 60000;
+}
+
 /** 'A' → 1, 'L' → 12, 'AA' → 27 */
 function indiceColumna(letra) {
   return String(letra).toUpperCase().split('').reduce((n, c) => n * 26 + c.charCodeAt(0) - 64, 0);
@@ -154,6 +183,7 @@ function mesDesdeNombreHoja(nombre) {
  *   mailboxesEquipo  → number[]
  *   tagsReasignacion → string[]
  *   transferenciaInternaEsReasignacion → boolean
+ *   minutos(fin, inicio) → (opcional) minutos entre dos Date; por defecto minutos corridos
  * @return {Object[]} eventos
  */
 function derivarEventos(conv, ctx) {
@@ -183,7 +213,7 @@ function derivarEventos(conv, ctx) {
       minutos: minutos == null ? null : Math.max(0, Math.round(minutos)),
     });
   };
-  const minutosEntre = (fin, inicio) => (fin - inicio) / 60000;
+  const minutosEntre = ctx.minutos || ((fin, inicio) => (fin - inicio) / 60000);
   const idUsuario = p => (p && Number(p.id) > 0 ? Number(p.id) : null);
   const agenteDe = id => (id === null ? null : ctx.agentePorId(id));
   const mailboxesEquipo = (ctx.mailboxesEquipo || []).map(Number);
@@ -326,10 +356,10 @@ function colorSemaforo(ratio, umbrales) {
   return 'ROJO';
 }
 
-/** Estadísticas de una lista de minutos → horas. */
-function estadisticasTiempo(minutos) {
+/** Estadísticas de una lista de minutos → horas; pctEnMeta = % de valores ≤ metaHoras. */
+function estadisticasTiempo(minutos, metaHoras) {
   const v = minutos.filter(m => typeof m === 'number' && !isNaN(m)).sort((a, b) => a - b);
-  if (!v.length) return { n: 0, promedioH: null, medianaH: null, pctMenos24h: null };
+  if (!v.length) return { n: 0, promedioH: null, medianaH: null, pctEnMeta: null };
   const mitad = Math.floor(v.length / 2);
   const mediana = v.length % 2 ? v[mitad] : (v[mitad - 1] + v[mitad]) / 2;
   const promedio = v.reduce((s, m) => s + m, 0) / v.length;
@@ -337,7 +367,7 @@ function estadisticasTiempo(minutos) {
     n: v.length,
     promedioH: Math.round(promedio / 60 * 10) / 10,
     medianaH: Math.round(mediana / 60 * 10) / 10,
-    pctMenos24h: v.filter(m => m < 24 * 60).length / v.length,
+    pctEnMeta: metaHoras == null ? null : v.filter(m => m <= metaHoras * 60).length / v.length,
   };
 }
 
@@ -488,6 +518,7 @@ function sincronizar_() {
     mailboxesEquipo: CONFIG.MAILBOXES_EQUIPO,
     tagsReasignacion: CONFIG.TAGS_REASIGNACION,
     transferenciaInternaEsReasignacion: CONFIG.TRANSFERENCIA_INTERNA_ES_REASIGNACION,
+    minutos: (fin, inicio) => minutosHabiles(relojLocal_(inicio, tz), relojLocal_(fin, tz), CONFIG.HORARIO_LABORAL),
   };
 
   const hojaEventos = hojaInterna_(ss, CONFIG.HOJAS.eventos, COLUMNAS_EVENTOS);
@@ -577,7 +608,7 @@ function tomarFotoInicioJornada_(ss, equipo, forzar) {
   const hora = Number(Utilities.formatDate(ahora, tz, 'H'));
   const props = PropertiesService.getScriptProperties();
   if (hoy < CONFIG.FECHA_INICIO) return null;
-  if (!forzar && (props.getProperty('HS_FOTO_DIA') === hoy || hora < CONFIG.HORA_INICIO_JORNADA)) return null;
+  if (!forzar && (props.getProperty('HS_FOTO_DIA') === hoy || hora < CONFIG.HORARIO_LABORAL.inicio)) return null;
 
   const mailbox = CONFIG.MAILBOXES_EQUIPO.length ? CONFIG.MAILBOXES_EQUIPO.join(',') : undefined;
   const filas = equipo.agentes.filter(a => a.id).map(a => {
@@ -589,6 +620,11 @@ function tomarFotoInicioJornada_(ss, equipo, forzar) {
   if (filas.length) hoja.getRange(hoja.getLastRow() + 1, 1, filas.length, filas[0].length).setValues(filas);
   props.setProperty('HS_FOTO_DIA', hoy);
   return hoy;
+}
+
+/** Date → Date cuyos campos UTC son la hora local (reloj de pared) en la zona horaria tz. */
+function relojLocal_(fecha, tz) {
+  return new Date(Utilities.formatDate(fecha, tz, "yyyy-MM-dd'T'HH:mm:ss'Z'"));
 }
 
 /** Hoja interna con encabezado (la crea si no existe). La columna 1 y 2 quedan como texto. */
@@ -766,7 +802,8 @@ function obtenerHojaMes_(ss, dia) {
 const COLUMNAS_RESUMEN = [
   'Mes', 'Agente', 'Días trabajados', 'Asignados', 'Nuevas consultas', 'Re-asignados',
   'Total gestionados', 'Cerrados', '% Resolución', 'Días en verde', 'Días en amarillo', 'Días en rojo',
-  '1ª respuesta prom. (h)', 'Resolución prom. (h)', 'Resolución mediana (h)', '% resueltos en < 24 h',
+  '1ª respuesta prom. (h lab.)', 'Resolución prom. (h lab.)', 'Resolución mediana (h lab.)',
+  '% resueltos en la meta',
   'Casos con tiempo medido',
 ];
 
@@ -845,14 +882,14 @@ function actualizarResumen_(ss) {
     lista.concat([equipo]).forEach(g => {
       if (g === equipo) filasEquipo.push(filas.length);
       const pr = estadisticasTiempo(g.primeraRespuesta);
-      const res = estadisticasTiempo(g.resolucion);
+      const res = estadisticasTiempo(g.resolucion, CONFIG.META_RESOLUCION_HORAS);
       filas.push([
         MESES[g.mes - 1] + ' ' + g.anio, g.agente, g.dias, g.asignados, g.nuevaConsulta, g.reasignados,
         g.total, g.cerrados, g.total > 0 ? g.cerrados / g.total : '', g.verde, g.amarillo, g.rojo,
         pr.promedioH == null ? '' : pr.promedioH,
         res.promedioH == null ? '' : res.promedioH,
         res.medianaH == null ? '' : res.medianaH,
-        res.pctMenos24h == null ? '' : res.pctMenos24h,
+        res.pctEnMeta == null ? '' : res.pctEnMeta,
         res.n || '',
       ]);
     });
@@ -865,7 +902,9 @@ function actualizarResumen_(ss) {
   hoja.getRange(1, 1).setValue('RESUMEN MENSUAL DE RENDIMIENTO — EQUIPO SOP').setFontSize(14).setFontWeight('bold');
   hoja.getRange(2, 1).setValue('Actualizado: ' + Utilities.formatDate(new Date(), tz, 'dd/MM/yyyy HH:mm') +
     '  ·  Semáforo por día: ≥ ' + CONFIG.SEMAFORO.verde * 100 + '% verde, ≥ ' + CONFIG.SEMAFORO.amarillo * 100 +
-    '% amarillo, menos es rojo  ·  Tiempos en horas calendario, desde ' + CONFIG.FECHA_INICIO);
+    '% amarillo, menos es rojo  ·  Tiempos en horas laborales (' + CONFIG.HORARIO_LABORAL.inicio + ':00–' +
+    CONFIG.HORARIO_LABORAL.fin + ':00, ' + nombresDias_(CONFIG.HORARIO_LABORAL.dias) + '), desde ' + CONFIG.FECHA_INICIO +
+    '  ·  Meta de resolución: ' + CONFIG.META_RESOLUCION_HORAS + ' h laborales');
   hoja.getRange(3, 1, 1, COLUMNAS_RESUMEN.length).setValues([COLUMNAS_RESUMEN])
     .setFontWeight('bold').setBackground('#434343').setFontColor('#ffffff').setWrap(true);
   hoja.setFrozenRows(3);
@@ -888,6 +927,16 @@ function actualizarResumen_(ss) {
   ]);
   hoja.setColumnWidth(1, 130);
   hoja.setColumnWidth(2, 160);
+}
+
+/** [1,2,3,4,5,6] → 'lun–sáb' */
+function nombresDias_(dias) {
+  const nombres = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
+  const orden = dias.slice().sort((a, b) => a - b);
+  const consecutivos = orden.every((d, i) => i === 0 || d === orden[i - 1] + 1);
+  return consecutivos && orden.length > 2
+    ? nombres[orden[0]] + '–' + nombres[orden[orden.length - 1]]
+    : orden.map(d => nombres[d]).join(', ');
 }
 
 // ===== Menu.gs =====
@@ -959,7 +1008,7 @@ function menuActivar() {
   ScriptApp.newTrigger('sincronizar').timeBased().everyMinutes(CONFIG.MINUTOS_ENTRE_SINCRONIZACIONES).create();
   sincronizar();
   SpreadsheetApp.getUi().alert('✅ Sincronización activada: cada ' + CONFIG.MINUTOS_ENTRE_SINCRONIZACIONES +
-    ' minutos. La foto de "sin atender" se toma a partir de las ' + CONFIG.HORA_INICIO_JORNADA + ':00.\n\n' +
+    ' minutos. La foto de "sin atender" se toma a partir de las ' + CONFIG.HORARIO_LABORAL.inicio + ':00.\n\n' +
     'La primera vez puede tardar varias ejecuciones en leer todo el historial desde ' + CONFIG.FECHA_INICIO + '.');
 }
 

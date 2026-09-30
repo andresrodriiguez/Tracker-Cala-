@@ -36,6 +36,7 @@ function sincronizar_() {
     mailboxesEquipo: CONFIG.MAILBOXES_EQUIPO,
     tagsReasignacion: CONFIG.TAGS_REASIGNACION,
     transferenciaInternaEsReasignacion: CONFIG.TRANSFERENCIA_INTERNA_ES_REASIGNACION,
+    minutos: (fin, inicio) => minutosHabiles(relojLocal_(inicio, tz), relojLocal_(fin, tz), CONFIG.HORARIO_LABORAL),
   };
 
   const hojaEventos = hojaInterna_(ss, CONFIG.HOJAS.eventos, COLUMNAS_EVENTOS);
@@ -125,7 +126,7 @@ function tomarFotoInicioJornada_(ss, equipo, forzar) {
   const hora = Number(Utilities.formatDate(ahora, tz, 'H'));
   const props = PropertiesService.getScriptProperties();
   if (hoy < CONFIG.FECHA_INICIO) return null;
-  if (!forzar && (props.getProperty('HS_FOTO_DIA') === hoy || hora < CONFIG.HORA_INICIO_JORNADA)) return null;
+  if (!forzar && (props.getProperty('HS_FOTO_DIA') === hoy || hora < CONFIG.HORARIO_LABORAL.inicio)) return null;
 
   const mailbox = CONFIG.MAILBOXES_EQUIPO.length ? CONFIG.MAILBOXES_EQUIPO.join(',') : undefined;
   const filas = equipo.agentes.filter(a => a.id).map(a => {
@@ -137,6 +138,11 @@ function tomarFotoInicioJornada_(ss, equipo, forzar) {
   if (filas.length) hoja.getRange(hoja.getLastRow() + 1, 1, filas.length, filas[0].length).setValues(filas);
   props.setProperty('HS_FOTO_DIA', hoy);
   return hoy;
+}
+
+/** Date → Date cuyos campos UTC son la hora local (reloj de pared) en la zona horaria tz. */
+function relojLocal_(fecha, tz) {
+  return new Date(Utilities.formatDate(fecha, tz, "yyyy-MM-dd'T'HH:mm:ss'Z'"));
 }
 
 /** Hoja interna con encabezado (la crea si no existe). La columna 1 y 2 quedan como texto. */

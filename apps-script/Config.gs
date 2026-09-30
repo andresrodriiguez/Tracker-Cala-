@@ -18,9 +18,16 @@ const CONFIG = {
   // Los días anteriores NUNCA se modifican (conservan lo que se llenó a mano).
   FECHA_INICIO: '2026-10-01',
 
-  // Hora (0-23, zona horaria de la hoja) en que se toma la "foto" de tickets sin atender
-  // al iniciar la jornada (columna "Tickets sin atender al iniciar la jornada").
-  HORA_INICIO_JORNADA: 9, // jornada del equipo: 9:00 a 17:00 hora de Miami
+  // Jornada del equipo (zona horaria de la hoja: Miami).
+  //  - A la hora "inicio" se toma la "foto" de tickets sin atender al iniciar la jornada.
+  //  - Los tiempos de respuesta y resolución cuentan SOLO minutos dentro de este horario
+  //    (un caso que llega a las 4:50 pm y se resuelve a las 9:10 am del día hábil siguiente = 20 min).
+  //  - dias: 0 = domingo, 1 = lunes … 6 = sábado.
+  HORARIO_LABORAL: { inicio: 9, fin: 17, dias: [1, 2, 3, 4, 5, 6] },
+
+  // Meta de resolución en horas LABORALES: el resumen muestra el % de casos resueltos dentro de ella.
+  // 8 h laborales = una jornada completa.
+  META_RESOLUCION_HORAS: 8,
 
   // Cada cuántos minutos se sincroniza con Help Scout (1, 5, 10, 15 o 30).
   MINUTOS_ENTRE_SINCRONIZACIONES: 15,

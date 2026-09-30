@@ -17,7 +17,7 @@ Help Scout (API v2) ──cada 15 min──►  Apps Script  ──►  Hoja del
 
 | Columna del tracker | Cómo se calcula desde Help Scout |
 |---|---|
-| **Tickets sin atender al iniciar la jornada** (C) | "Foto" diaria a la `HORA_INICIO_JORNADA`: casos en estado *Active* asignados al agente. |
+| **Tickets sin atender al iniciar la jornada** (C) | "Foto" diaria al inicio de la jornada (9:00 am, hora de Miami): casos en estado *Active* asignados al agente. |
 | **Tickets asignados en el día** (D) | Casos que quedaron asignados al agente ese día, ya sea que los asigne el líder o que el agente los tome. |
 | **Nueva consulta en ticket ya asignado** (E) | El cliente volvió a escribir en un caso que el agente tenía desde un día anterior y que ya había respondido, dejado en *Pending* o cerrado. Cuenta máximo 1 por caso por día. |
 | **Ticket re-asignados a otro dep. CCH / COACH** (F) | El caso pasó del agente a un usuario o equipo de Help Scout que **no** es del equipo SOP, o se movió a un buzón de otro departamento, o tiene una etiqueta configurada. Pasarlo a otro compañero del equipo también cuenta, porque así no le queda pendiente (se puede desactivar). |
@@ -33,7 +33,7 @@ Reglas importantes:
 
 ## Hojas nuevas que crea
 
-- **RESUMEN MENSUAL**: por mes y por agente, con una fila de total del EQUIPO. Muestra días trabajados, asignados, nuevas consultas, re-asignados, total, cerrados, **% de resolución**, días en verde, amarillo y rojo, **tiempo promedio de 1ª respuesta**, **tiempo promedio y mediano de resolución**, y **% de casos resueltos en menos de 24 h**. Las cantidades salen de las hojas mensuales, así que incluye febrero a septiembre aunque se hayan llenado a mano. Los tiempos existen desde que se activa la automatización.
+- **RESUMEN MENSUAL**: por mes y por agente, con una fila de total del EQUIPO. Muestra días trabajados, asignados, nuevas consultas, re-asignados, total, cerrados, **% de resolución**, días en verde, amarillo y rojo, **tiempo promedio de 1ª respuesta**, **tiempo promedio y mediano de resolución**, y **% de casos resueltos dentro de la meta** (por defecto 8 h laborales). Los tiempos se cuentan **solo en horario laboral** (9:00–17:00, lunes a sábado). Las cantidades salen de las hojas mensuales, así que incluye febrero a septiembre aunque se hayan llenado a mano. Los tiempos existen desde que se activa la automatización.
 - **HS_Eventos**: cada asignación, re-asignación, nueva consulta, primera respuesta y cierre, con agente, número de caso, minutos y **enlace directo al caso en Help Scout**. Sirve para auditar y para hacer tablas dinámicas.
 - **HS_InicioJornada**: la foto diaria de casos sin atender por agente.
 - **HS_Usuarios**: usuarios y buzones de Help Scout con sus IDs, para revisar la configuración.
@@ -65,7 +65,8 @@ El tracker hoy es un archivo **.xlsx** abierto en Drive, y Apps Script no funcio
 ### 4. Configurar (sección `CONFIG` al inicio del código)
 - **AGENTES**: nombre como aparece en la columna "Nombre del Agente" y su **email de Help Scout** (ya configurados para Jaideth, Maryelin, Edna y Andrés).
 - **FECHA_INICIO**: desde qué día llena la automatización.
-- **HORA_INICIO_JORNADA**: hora de la foto de "sin atender".
+- **HORARIO_LABORAL**: jornada del equipo (9:00–17:00, lunes a sábado). Marca la hora de la foto de "sin atender" y el horario en que corren los tiempos.
+- **META_RESOLUCION_HORAS**: meta de resolución en horas laborales (por defecto 8 = una jornada).
 - **Re-asignaciones a CCH / COACH**: ver la sección [¿Cómo pasan los casos a CCH / COACH?](#cómo-pasan-los-casos-a-cch--coach).
 
 ### 5. Activar
@@ -90,7 +91,7 @@ Según cómo lo hagan en Help Scout, ajusta `Config.gs`:
 
 - **¿Es instantáneo?** Se actualiza cada 15 minutos (`MINUTOS_ENTRE_SINCRONIZACIONES`, mínimo 1). "Help Scout → Sincronizar ahora" fuerza una actualización.
 - **¿Los agentes siguen llenando algo a mano?** No hace falta. Si alguien edita una columna automática del día, la siguiente sincronización la sobrescribe. Si quieres que una columna siga siendo manual, quítala de `COLUMNAS_AUTOMATICAS`. "Observaciones" siempre es manual.
-- **¿Los tiempos son en horario laboral?** No, son horas calendario: un caso asignado el viernes a las 5 pm y cerrado el lunes a las 9 am suma 64 h. Por eso el resumen muestra también la **mediana**, que se ve menos afectada por esos casos.
+- **¿Los tiempos son en horario laboral?** Sí. Solo cuentan los minutos dentro de `HORARIO_LABORAL` (9:00–17:00, lunes a sábado, hora de Miami). Un caso que llega el jueves a las 4:50 pm y se resuelve el viernes a las 9:10 am suma **20 minutos**, no 16 horas. El trabajo fuera de horario cuenta como 0.
 - **¿Qué pasa si cambia la fórmula de "Total"?** El script no la escribe. Los "Pendientes" usan `C + D + E − F − H`; si tu fórmula de Total no incluye la columna C, avísame para alinearlo.
 - **Reiniciar**: "Reiniciar sincronización" vuelve a leer Help Scout desde `FECHA_INICIO` sin duplicar eventos.
 

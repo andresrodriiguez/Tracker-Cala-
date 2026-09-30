@@ -6,7 +6,8 @@
 const COLUMNAS_RESUMEN = [
   'Mes', 'Agente', 'Días trabajados', 'Asignados', 'Nuevas consultas', 'Re-asignados',
   'Total gestionados', 'Cerrados', '% Resolución', 'Días en verde', 'Días en amarillo', 'Días en rojo',
-  '1ª respuesta prom. (h)', 'Resolución prom. (h)', 'Resolución mediana (h)', '% resueltos en < 24 h',
+  '1ª respuesta prom. (h lab.)', 'Resolución prom. (h lab.)', 'Resolución mediana (h lab.)',
+  '% resueltos en la meta',
   'Casos con tiempo medido',
 ];
 
@@ -85,14 +86,14 @@ function actualizarResumen_(ss) {
     lista.concat([equipo]).forEach(g => {
       if (g === equipo) filasEquipo.push(filas.length);
       const pr = estadisticasTiempo(g.primeraRespuesta);
-      const res = estadisticasTiempo(g.resolucion);
+      const res = estadisticasTiempo(g.resolucion, CONFIG.META_RESOLUCION_HORAS);
       filas.push([
         MESES[g.mes - 1] + ' ' + g.anio, g.agente, g.dias, g.asignados, g.nuevaConsulta, g.reasignados,
         g.total, g.cerrados, g.total > 0 ? g.cerrados / g.total : '', g.verde, g.amarillo, g.rojo,
         pr.promedioH == null ? '' : pr.promedioH,
         res.promedioH == null ? '' : res.promedioH,
         res.medianaH == null ? '' : res.medianaH,
-        res.pctMenos24h == null ? '' : res.pctMenos24h,
+        res.pctEnMeta == null ? '' : res.pctEnMeta,
         res.n || '',
       ]);
     });
@@ -105,7 +106,9 @@ function actualizarResumen_(ss) {
   hoja.getRange(1, 1).setValue('RESUMEN MENSUAL DE RENDIMIENTO — EQUIPO SOP').setFontSize(14).setFontWeight('bold');
   hoja.getRange(2, 1).setValue('Actualizado: ' + Utilities.formatDate(new Date(), tz, 'dd/MM/yyyy HH:mm') +
     '  ·  Semáforo por día: ≥ ' + CONFIG.SEMAFORO.verde * 100 + '% verde, ≥ ' + CONFIG.SEMAFORO.amarillo * 100 +
-    '% amarillo, menos es rojo  ·  Tiempos en horas calendario, desde ' + CONFIG.FECHA_INICIO);
+    '% amarillo, menos es rojo  ·  Tiempos en horas laborales (' + CONFIG.HORARIO_LABORAL.inicio + ':00–' +
+    CONFIG.HORARIO_LABORAL.fin + ':00, ' + nombresDias_(CONFIG.HORARIO_LABORAL.dias) + '), desde ' + CONFIG.FECHA_INICIO +
+    '  ·  Meta de resolución: ' + CONFIG.META_RESOLUCION_HORAS + ' h laborales');
   hoja.getRange(3, 1, 1, COLUMNAS_RESUMEN.length).setValues([COLUMNAS_RESUMEN])
     .setFontWeight('bold').setBackground('#434343').setFontColor('#ffffff').setWrap(true);
   hoja.setFrozenRows(3);
@@ -128,4 +131,14 @@ function actualizarResumen_(ss) {
   ]);
   hoja.setColumnWidth(1, 130);
   hoja.setColumnWidth(2, 160);
+}
+
+/** [1,2,3,4,5,6] → 'lun–sáb' */
+function nombresDias_(dias) {
+  const nombres = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
+  const orden = dias.slice().sort((a, b) => a - b);
+  const consecutivos = orden.every((d, i) => i === 0 || d === orden[i - 1] + 1);
+  return consecutivos && orden.length > 2
+    ? nombres[orden[0]] + '–' + nombres[orden[orden.length - 1]]
+    : orden.map(d => nombres[d]).join(', ');
 }
