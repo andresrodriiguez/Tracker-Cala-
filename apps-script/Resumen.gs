@@ -36,7 +36,6 @@ function actualizarResumen_(ss) {
     hoja.getRange(cfg.FILA_INICIO_DATOS, 1, n, ultimaCol).getValues().forEach(f => {
       const agente = String(f[col('agente')] || '').trim();
       if (!agente || !diaDesdeCelda(f[col('fecha')], formatear)) return;
-      const g = grupo(mes.anio, mes.mes, agente);
       const d = {
         sinAtender: num(f[col('sinAtender')]), asignados: num(f[col('asignados')]),
         nuevaConsulta: num(f[col('nuevaConsulta')]), reasignados: num(f[col('reasignados')]),
@@ -45,6 +44,8 @@ function actualizarResumen_(ss) {
       const totalHoja = f[col('total')];
       const total = typeof totalHoja === 'number' ? totalHoja
         : d.sinAtender + d.asignados + d.nuevaConsulta - d.reasignados;
+      if (total <= 0 && d.cerrados === 0) return; // día libre, vacaciones o fila sin datos
+      const g = grupo(mes.anio, mes.mes, agente);
       g.dias++;
       g.asignados += d.asignados;
       g.nuevaConsulta += d.nuevaConsulta;
