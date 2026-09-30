@@ -20,7 +20,7 @@ const CONFIG = {
 
   // Hora (0-23, zona horaria de la hoja) en que se toma la "foto" de tickets sin atender
   // al iniciar la jornada (columna "Tickets sin atender al iniciar la jornada").
-  HORA_INICIO_JORNADA: 8,
+  HORA_INICIO_JORNADA: 9, // jornada del equipo: 9:00 a 17:00 hora de Miami
 
   // Cada cuántos minutos se sincroniza con Help Scout (1, 5, 10, 15 o 30).
   MINUTOS_ENTRE_SINCRONIZACIONES: 15,
