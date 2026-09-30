@@ -94,12 +94,6 @@ function hsHilos_(conversacionId) {
   return hsListarTodo_('/conversations/' + conversacionId + '/threads', {}, 'threads');
 }
 
-/** Número de conversaciones que cumplen el filtro (sin descargarlas). */
-function hsContarConversaciones_(params) {
-  const data = hsGet_('/conversations', Object.assign({}, params, { page: 1 }));
-  return data.page ? data.page.totalElements : ((data._embedded && data._embedded.conversations) || []).length;
-}
-
 /** Date → '2026-09-30T13:00:00Z' (formato que espera Help Scout). */
 function hsFechaIso_(fecha) {
   return fecha.toISOString().replace(/\.\d{3}Z$/, 'Z');

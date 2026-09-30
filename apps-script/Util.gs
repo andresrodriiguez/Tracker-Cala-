@@ -52,6 +52,20 @@ function minutosHabiles(inicioLocal, finLocal, horario) {
   return total / 60000;
 }
 
+/**
+ * Día de jornada ('yyyy-MM-dd') al que pertenece un momento (hora local como campos UTC):
+ * después del cierre de la jornada o en un día no laboral pasa al siguiente día laboral;
+ * antes de la apertura cuenta para ese mismo día (si es laboral).
+ * Ej. (9–17, lun–sáb): martes 20:00 → miércoles; sábado 18:00 → lunes; lunes 7:30 → lunes.
+ */
+function diaDeJornada(local, horario) {
+  const DIA = 86400000;
+  let d = Math.floor(local.getTime() / DIA) * DIA;
+  if ((local.getTime() - d) / 3600000 >= horario.fin) d += DIA;
+  for (let i = 0; i < 7 && horario.dias.indexOf(new Date(d).getUTCDay()) < 0; i++) d += DIA;
+  return new Date(d).toISOString().slice(0, 10);
+}
+
 /** 'A' → 1, 'L' → 12, 'AA' → 27 */
 function indiceColumna(letra) {
   return String(letra).toUpperCase().split('').reduce((n, c) => n * 26 + c.charCodeAt(0) - 64, 0);

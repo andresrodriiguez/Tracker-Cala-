@@ -9,7 +9,7 @@ const contexto = vm.createContext({});
 ['Config.gs', 'Util.gs', 'Eventos.gs', 'Metricas.gs'].forEach(archivo => {
   vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'apps-script', archivo), 'utf8'), contexto, { filename: archivo });
 });
-const { derivarEventos, contarDia, colorSemaforo, estadisticasTiempo, diaDesdeCelda, mesDesdeNombreHoja, nombreHojaMes, normalizarTexto, minutosHabiles } = contexto;
+const { derivarEventos, contarDia, colorSemaforo, estadisticasTiempo, diaDesdeCelda, mesDesdeNombreHoja, nombreHojaMes, normalizarTexto, minutosHabiles, diaDeJornada } = contexto;
 
 const JAIDETH = { id: 1, nombre: 'Jaideth Andocilla' };
 const EDNA = { id: 2, nombre: 'Edna Escudero' };
@@ -196,4 +196,28 @@ test('los tiempos de los eventos usan horario laboral cuando se configura', () =
     respuesta('2026-10-02T09:10:00Z', JAIDETH.id, { status: 'closed' }),
   ]), ctx({ minutos: (fin, inicio) => minutosHabiles(inicio, fin, HORARIO) }));
   assert.deepEqual(Array.from(evs, e => e.tipo + ':' + e.minutos), ['ASIGNADO:null', 'PRIMERA_RESPUESTA:20', 'CERRADO:20']);
+});
+
+test('día de jornada: lo de la noche o del domingo cuenta para el siguiente día laboral', () => {
+  assert.equal(diaDeJornada(L('2026-10-01T10:00:00'), HORARIO), '2026-10-01'); // jueves en horario
+  assert.equal(diaDeJornada(L('2026-10-01T07:30:00'), HORARIO), '2026-10-01'); // jueves antes de abrir
+  assert.equal(diaDeJornada(L('2026-10-01T16:59:00'), HORARIO), '2026-10-01'); // jueves justo antes de cerrar
+  assert.equal(diaDeJornada(L('2026-10-01T17:00:00'), HORARIO), '2026-10-02'); // jueves al cierre → viernes
+  assert.equal(diaDeJornada(L('2026-10-01T22:15:00'), HORARIO), '2026-10-02'); // jueves noche → viernes
+  assert.equal(diaDeJornada(L('2026-10-03T18:00:00'), HORARIO), '2026-10-05'); // sábado noche → lunes
+  assert.equal(diaDeJornada(L('2026-10-04T12:00:00'), HORARIO), '2026-10-05'); // domingo → lunes
+  assert.equal(diaDeJornada(L('2026-10-03T11:00:00'), HORARIO), '2026-10-03'); // sábado en horario
+});
+
+test('un caso asignado de noche cuenta como asignado del día siguiente', () => {
+  const evs = derivarEventos(conv([
+    cliente('2026-10-01T21:00:00Z', { assignedTo: null }),
+    asignar('2026-10-01T21:30:00Z', JAIDETH.id), // jueves 21:30 (hora local en la prueba)
+    respuesta('2026-10-02T09:20:00Z', JAIDETH.id, { status: 'closed' }),
+  ]), ctx({
+    dia: f => diaDeJornada(f, HORARIO),
+    minutos: (fin, inicio) => minutosHabiles(inicio, fin, HORARIO),
+  }));
+  assert.deepEqual(Array.from(evs, e => e.tipo + ':' + e.dia + ':' + e.minutos),
+    ['ASIGNADO:2026-10-02:null', 'PRIMERA_RESPUESTA:2026-10-02:20', 'CERRADO:2026-10-02:20']);
 });

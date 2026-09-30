@@ -19,7 +19,9 @@ function sincronizar_() {
   const inicio = Date.now();
   const ss = SpreadsheetApp.getActive();
   const tz = ss.getSpreadsheetTimeZone();
-  const dia = fecha => Utilities.formatDate(fecha, tz, 'yyyy-MM-dd');
+  // Cada evento cuenta para su día de jornada: lo que pasa de noche o en domingo va al siguiente día laboral.
+  const dia = fecha => diaDeJornada(relojLocal_(fecha, tz), CONFIG.HORARIO_LABORAL);
+  const diaCalendario = fecha => Utilities.formatDate(fecha, tz, 'yyyy-MM-dd');
   const equipo = resolverEquipo_();
   const props = PropertiesService.getScriptProperties();
 
@@ -58,7 +60,7 @@ function sincronizar_() {
         conv._embedded.threads = hsHilos_(conv.id);
       }
       derivarEventos(conv, ctx).forEach(ev => {
-        if (ev.dia < CONFIG.FECHA_INICIO || ids.has(ev.id)) return;
+        if (diaCalendario(ev.fecha) < CONFIG.FECHA_INICIO || ids.has(ev.id)) return;
         ids.add(ev.id);
         nuevos.push(ev);
       });
@@ -125,13 +127,20 @@ function tomarFotoInicioJornada_(ss, equipo, forzar) {
   const hoy = Utilities.formatDate(ahora, tz, 'yyyy-MM-dd');
   const hora = Number(Utilities.formatDate(ahora, tz, 'H'));
   const props = PropertiesService.getScriptProperties();
+  const esLaboral = CONFIG.HORARIO_LABORAL.dias.indexOf(Number(Utilities.formatDate(ahora, tz, 'u')) % 7) >= 0;
   if (hoy < CONFIG.FECHA_INICIO) return null;
-  if (!forzar && (props.getProperty('HS_FOTO_DIA') === hoy || hora < CONFIG.HORARIO_LABORAL.inicio)) return null;
+  if (!forzar && (!esLaboral || props.getProperty('HS_FOTO_DIA') === hoy || hora < CONFIG.HORARIO_LABORAL.inicio)) return null;
 
+  // Los casos que ya cuentan hoy como "asignados" o "nueva consulta" (p. ej. asignados anoche)
+  // no se cuentan otra vez como "sin atender".
+  const yaContados = new Set(leerEventos_(ss)
+    .filter(e => e.dia === hoy && (e.tipo === 'ASIGNADO' || e.tipo === 'NUEVA_CONSULTA'))
+    .map(e => normalizarTexto(e.agente) + '|' + e.numero));
   const mailbox = CONFIG.MAILBOXES_EQUIPO.length ? CONFIG.MAILBOXES_EQUIPO.join(',') : undefined;
   const filas = equipo.agentes.filter(a => a.id).map(a => {
     const n = CONFIG.ESTADOS_SIN_ATENDER.reduce((suma, estado) =>
-      suma + hsContarConversaciones_({ status: estado, assigned_to: a.id, mailbox: mailbox }), 0);
+      suma + hsListarTodo_('/conversations', { status: estado, assigned_to: a.id, mailbox: mailbox }, 'conversations')
+        .filter(c => !yaContados.has(normalizarTexto(a.nombre) + '|' + c.number)).length, 0);
     return [hoy, a.nombre, a.id, n, ahora];
   });
   const hoja = hojaInterna_(ss, CONFIG.HOJAS.fotos, ['Día', 'Agente', 'ID agente HS', 'Sin atender', 'Tomada']);
@@ -182,7 +191,8 @@ function leerEventos_(ss) {
   const tz = ss.getSpreadsheetTimeZone();
   const formatear = f => Utilities.formatDate(f, tz, 'yyyy-MM-dd');
   return leerFilas_(hoja).map(f => ({
-    dia: diaDesdeCelda(f[1], formatear), tipo: f[3], agente: f[4], minutos: f[8] === '' ? null : Number(f[8]),
+    dia: diaDesdeCelda(f[1], formatear), tipo: f[3], agente: f[4], numero: Number(f[6]),
+    minutos: f[8] === '' ? null : Number(f[8]),
   }));
 }
 

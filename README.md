@@ -27,6 +27,8 @@ Help Scout (API v2) ──cada 15 min──►  Apps Script  ──►  Hoja del
 | **% / Semáforo** y **Observaciones** | **No se tocan.** |
 
 Reglas importantes:
+- **Cada movimiento cuenta para su día de jornada** (9:00–17:00, lunes a sábado, hora de Miami). Lo que pasa **después de las 5:00 pm o en domingo cuenta para el siguiente día laboral**; por ejemplo, un caso asignado el martes a las 10 pm es "asignado" del miércoles. Lo que pasa **antes de las 9:00 am** cuenta para ese mismo día. En la hoja HS_Eventos se ve la hora real de cada movimiento.
+- Un caso asignado de noche o de madrugada cuenta **solo como "asignado"** de ese día, no también como "sin atender al iniciar la jornada".
 - Los días **anteriores a `FECHA_INICIO`** (por defecto `2026-10-01`) nunca se modifican, así que lo que ya llenaste a mano queda intacto.
 - Solo se crean filas cuando el agente tiene actividad ese día, así que no aparecen filas en rojo por días libres.
 - Si no existe la hoja del mes (por ejemplo `NOVIEMBRE 2026`), se crea copiando la del mes anterior: mismas fórmulas y formato, sin datos.
