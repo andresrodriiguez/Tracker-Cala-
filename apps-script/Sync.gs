@@ -153,10 +153,17 @@ function tomarFotoInicioJornada_(ss, equipo, forzar) {
       .filter(e => e.tipo === 'CERRADO' && normalizarTexto(e.agente) === normalizarTexto(a.nombre) &&
         !yaContados.has(clave(e.agente, e.numero)))
       .forEach(e => pendientes.add(e.numero));
-    return [hoy, a.nombre, a.id, pendientes.size, ahora];
+    const casos = Array.from(pendientes).sort((x, y) => x - y).map(n => '#' + n).join(', ');
+    return [hoy, a.nombre, a.id, pendientes.size, ahora, casos];
   });
-  const hoja = hojaInterna_(ss, CONFIG.HOJAS.fotos, ['Día', 'Agente', 'ID agente HS', 'Sin atender', 'Tomada']);
-  if (filas.length) hoja.getRange(hoja.getLastRow() + 1, 1, filas.length, filas[0].length).setValues(filas);
+  const encabezado = ['Día', 'Agente', 'ID agente HS', 'Sin atender', 'Tomada', 'Casos contados'];
+  const hoja = hojaInterna_(ss, CONFIG.HOJAS.fotos, encabezado);
+  hoja.getRange(1, 1, 1, encabezado.length).setValues([encabezado]).setFontWeight('bold');
+  if (filas.length) {
+    const inicio = hoja.getLastRow() + 1;
+    hoja.getRange(inicio, 1, filas.length, filas[0].length).setValues(filas);
+    hoja.getRange(inicio, 5, filas.length, 1).setNumberFormat('dd/MM/yyyy HH:mm');
+  }
   props.setProperty('HS_FOTO_DIA', hoy);
   return hoy;
 }

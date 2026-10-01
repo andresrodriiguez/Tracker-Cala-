@@ -37,7 +37,7 @@ Reglas importantes:
 
 - **RESUMEN MENSUAL**: por mes y por agente, con una fila de total del EQUIPO. Muestra días trabajados, asignados, nuevas consultas, re-asignados, total, cerrados, **% de resolución**, días en verde, amarillo y rojo, **tiempo promedio de 1ª respuesta**, **tiempo promedio y mediano de resolución**, y **% de casos resueltos dentro de la meta** (por defecto 8 h laborales). Los tiempos se cuentan **solo en horario laboral** (9:00–17:00, lunes a sábado). Las cantidades salen de las hojas mensuales, así que incluye febrero a septiembre aunque se hayan llenado a mano. Los tiempos existen desde que se activa la automatización.
 - **HS_Eventos**: cada asignación, re-asignación, nueva consulta, primera respuesta y cierre, con agente, número de caso, minutos y **enlace directo al caso en Help Scout**. Sirve para auditar y para hacer tablas dinámicas.
-- **HS_InicioJornada**: la foto diaria de casos sin atender por agente.
+- **HS_InicioJornada**: la foto diaria de casos sin atender por agente, con la hora y la **lista de números de caso que contó** (para revisarlos en Help Scout).
 - **HS_Usuarios**: usuarios y buzones de Help Scout con sus IDs, para revisar la configuración.
 
 ## Instalación (una sola vez, ~15 min)
