@@ -228,3 +228,11 @@ test('tiempo de gestión: fuera de horario el mismo día cuenta minutos reales',
   assert.equal(minutosGestion(L('2026-10-01T18:00:00'), L('2026-10-02T08:00:00'), HORARIO), 0);  // noche → madrugada siguiente: 0
   assert.equal(minutosGestion(L('2026-10-01T08:30:00'), L('2026-10-01T09:30:00'), HORARIO), 30); // parte dentro del horario
 });
+
+test('cerrar un caso sin asignar (spam, notificación) no cuenta como cerrado de nadie', () => {
+  const evs = derivarEventos(conv([
+    cliente('2026-10-01T12:59:00Z', { assignedTo: null }),
+    { id: siguienteId++, type: 'lineitem', status: 'closed', createdAt: '2026-10-01T13:03:00Z', createdBy: { id: ANDRES.id, type: 'user' }, assignedTo: null },
+  ]), ctx());
+  assert.equal(evs.length, 0);
+});

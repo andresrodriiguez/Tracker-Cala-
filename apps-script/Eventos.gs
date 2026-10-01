@@ -135,7 +135,9 @@ function derivarEventos(conv, ctx) {
     if (nuevoEstado === 'pending' || nuevoEstado === 'closed') esperandoAgente = false;
     if (estadoPrevio === 'closed' && nuevoEstado !== 'closed') inicioCiclo = fecha;
     if (nuevoEstado === 'closed' && estadoPrevio !== 'closed') {
-      const agente = agenteDe(asignado) || (autor.type === 'user' ? ctx.agentePorId(Number(autor.id)) : null);
+      // Solo cuenta si el caso estaba asignado a una agente del equipo (cerrar correos sin asignar,
+      // como spam o notificaciones, no es un cierre de nadie).
+      const agente = agenteDe(asignado);
       if (agente) {
         emitir('CERRADO', 'C-' + h.id, agente, fecha,
           minutosEntre(fecha, inicioCiclo || new Date(conv.createdAt)));

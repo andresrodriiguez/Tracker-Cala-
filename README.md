@@ -22,7 +22,7 @@ Help Scout (API v2) ──cada 15 min──►  Apps Script  ──►  Hoja del
 | **Nueva consulta en ticket ya asignado** (E) | El cliente volvió a escribir en un caso que el agente tenía desde un día anterior y que ya había respondido, dejado en *Pending* o cerrado. Cuenta máximo 1 por caso por día. |
 | **Ticket re-asignados a otro dep. CCH / COACH** (F) | El caso pasó del agente a un usuario o equipo de Help Scout que **no** es del equipo SOP, o se movió a un buzón de otro departamento, o tiene una etiqueta configurada. Pasarlo a otro compañero del equipo también cuenta, porque así no le queda pendiente (se puede desactivar). |
 | **Total Tickets Gestionados (Auto)** (G) | **No se toca**: sigue siendo tu fórmula. |
-| **Tickets Cerrados** (H) | Casos que pasaron a *Closed* estando a cargo del agente. |
+| **Tickets Cerrados** (H) | Casos que pasaron a *Closed* estando asignados al agente. Cerrar correos sin asignar (spam, notificaciones) no cuenta. |
 | **Tickets Pendientes/Seguimiento** (I) | `C + D + E − F − H` (mínimo 0). |
 | **% / Semáforo** y **Observaciones** | **No se tocan.** |
 
@@ -95,7 +95,7 @@ Según cómo lo hagan en Help Scout, ajusta `Config.gs`:
 - **¿Los agentes siguen llenando algo a mano?** No hace falta. Si alguien edita una columna automática del día, la siguiente sincronización la sobrescribe. Si quieres que una columna siga siendo manual, quítala de `COLUMNAS_AUTOMATICAS`. "Observaciones" siempre es manual.
 - **¿Los tiempos son en horario laboral?** Sí. Solo cuentan los minutos dentro de `HORARIO_LABORAL` (9:00–17:00, lunes a sábado, hora de Miami). Un caso que llega el jueves a las 4:50 pm y se resuelve el viernes a las 9:10 am suma **20 minutos**, no 16 horas. El trabajo fuera de horario cuenta como 0.
 - **¿Qué pasa si cambia la fórmula de "Total"?** El script no la escribe. Los "Pendientes" usan `C + D + E − F − H`; si tu fórmula de Total no incluye la columna C, avísame para alinearlo.
-- **Reiniciar**: "Reiniciar sincronización" vuelve a leer Help Scout desde `FECHA_INICIO` sin duplicar eventos.
+- **Recalcular**: "Recalcular todo desde FECHA_INICIO" borra HS_Eventos, vuelve a leer Help Scout desde `FECHA_INICIO` y rehace la foto de hoy. Úsalo después de actualizar el código.
 
 ## Desarrollo
 

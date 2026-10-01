@@ -5,11 +5,13 @@ const LIMITE_EJECUCION_MS = 4.5 * 60 * 1000; // Apps Script corta a los 6 min
 const COLUMNAS_EVENTOS = ['ID', 'Día', 'Fecha y hora', 'Tipo', 'Agente', 'ID agente HS',
   '# Conversación', 'Asunto', 'Minutos', 'Horas', 'Enlace'];
 
+/** @return {boolean} false si no corrió porque ya había otra sincronización en curso */
 function sincronizar() {
   const lock = LockService.getScriptLock();
-  if (!lock.tryLock(5000)) return; // ya hay otra sincronización corriendo
+  if (!lock.tryLock(5000)) return false; // ya hay otra sincronización corriendo
   try {
     sincronizar_();
+    return true;
   } finally {
     lock.releaseLock();
   }
@@ -80,7 +82,8 @@ function sincronizar_() {
   props.setProperty('HS_ESTADO_SYNC', JSON.stringify(estado));
 
   const diasTocados = new Set(nuevos.map(e => e.dia));
-  const foto = tomarFotoInicioJornada_(ss, equipo, false);
+  // La foto se toma solo con la lectura completa, para descontar bien lo que ya cuenta hoy.
+  const foto = terminado ? tomarFotoInicioJornada_(ss, equipo, false) : null;
   if (foto) diasTocados.add(foto);
 
   if (diasTocados.size) {

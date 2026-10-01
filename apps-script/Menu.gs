@@ -13,7 +13,7 @@ function onOpen() {
     .addItem('Ver estado', 'menuEstado')
     .addSeparator()
     .addItem('Desactivar sincronización automática', 'menuDesactivar')
-    .addItem('Reiniciar sincronización (volver a leer desde FECHA_INICIO)', 'menuReiniciar')
+    .addItem('Recalcular todo desde FECHA_INICIO', 'menuReiniciar')
     .addToUi();
 }
 
@@ -76,8 +76,10 @@ function menuDesactivar() {
 }
 
 function menuSincronizar() {
-  sincronizar();
-  SpreadsheetApp.getActive().toast('Sincronización terminada.', 'Help Scout');
+  const corrio = sincronizar();
+  SpreadsheetApp.getActive().toast(corrio
+    ? 'Sincronización terminada.'
+    : 'Ya hay una sincronización en curso. Espera un minuto y vuelve a intentarlo.', 'Help Scout');
 }
 
 function menuFoto() {
@@ -109,15 +111,35 @@ function menuEstado() {
     'Credenciales: ' + (props.getProperty('HS_APP_ID') ? 'configuradas' : 'FALTAN'));
 }
 
+/** Borra HS_Eventos, vuelve a leer Help Scout desde FECHA_INICIO y rehace la foto de hoy. */
 function menuReiniciar() {
   const ui = SpreadsheetApp.getUi();
-  const r = ui.alert('Reiniciar sincronización',
-    'Se volverá a leer Help Scout desde ' + CONFIG.FECHA_INICIO + '. Los eventos ya guardados no se duplican.\n¿Continuar?',
-    ui.ButtonSet.YES_NO);
+  const r = ui.alert('Recalcular todo',
+    'Se borrará la pestaña HS_Eventos y se volverá a leer Help Scout desde ' + CONFIG.FECHA_INICIO +
+    '. La foto de "sin atender" de hoy se vuelve a tomar con los casos abiertos en este momento.\n' +
+    'Puede tardar unos minutos. ¿Continuar?', ui.ButtonSet.YES_NO);
   if (r !== ui.Button.YES) return;
-  PropertiesService.getScriptProperties().deleteProperty('HS_ESTADO_SYNC');
-  CacheService.getScriptCache().remove('HS_USUARIOS');
-  ui.alert('Listo. Usa "Sincronizar ahora" o espera la próxima sincronización automática.');
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) {
+    ui.alert('Hay una sincronización en curso. Intenta de nuevo en un minuto.');
+    return;
+  }
+  try {
+    const ss = SpreadsheetApp.getActive();
+    const hoja = ss.getSheetByName(CONFIG.HOJAS.eventos);
+    if (hoja && hoja.getLastRow() > 1) hoja.getRange(2, 1, hoja.getLastRow() - 1, hoja.getLastColumn()).clearContent();
+    const props = PropertiesService.getScriptProperties();
+    props.deleteProperty('HS_ESTADO_SYNC');
+    props.deleteProperty('HS_FOTO_DIA');
+    CacheService.getScriptCache().remove('HS_USUARIOS');
+    sincronizar_();
+  } finally {
+    lock.releaseLock();
+  }
+  const pendiente = JSON.parse(PropertiesService.getScriptProperties().getProperty('HS_ESTADO_SYNC') || 'null');
+  ui.alert(pendiente && pendiente.pagina > 1
+    ? 'Recalculando… Help Scout tiene muchos casos: la sincronización automática termina de leerlos en los próximos minutos.'
+    : '✅ Listo: todo recalculado desde ' + CONFIG.FECHA_INICIO + '.');
 }
 
 function eliminarActivadores_() {
