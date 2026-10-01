@@ -38,7 +38,7 @@ function sincronizar_() {
     mailboxesEquipo: CONFIG.MAILBOXES_EQUIPO,
     tagsReasignacion: CONFIG.TAGS_REASIGNACION,
     transferenciaInternaEsReasignacion: CONFIG.TRANSFERENCIA_INTERNA_ES_REASIGNACION,
-    minutos: (fin, inicio) => minutosHabiles(relojLocal_(inicio, tz), relojLocal_(fin, tz), CONFIG.HORARIO_LABORAL),
+    minutos: (fin, inicio) => minutosGestion(relojLocal_(inicio, tz), relojLocal_(fin, tz), CONFIG.HORARIO_LABORAL),
   };
 
   const hojaEventos = hojaInterna_(ss, CONFIG.HOJAS.eventos, COLUMNAS_EVENTOS);
@@ -133,15 +133,24 @@ function tomarFotoInicioJornada_(ss, equipo, forzar) {
 
   // Los casos que ya cuentan hoy como "asignados" o "nueva consulta" (p. ej. asignados anoche)
   // no se cuentan otra vez como "sin atender".
-  const yaContados = new Set(leerEventos_(ss)
-    .filter(e => e.dia === hoy && (e.tipo === 'ASIGNADO' || e.tipo === 'NUEVA_CONSULTA'))
-    .map(e => normalizarTexto(e.agente) + '|' + e.numero));
+  const eventosHoy = leerEventos_(ss).filter(e => e.dia === hoy);
+  const clave = (agente, numero) => normalizarTexto(agente) + '|' + numero;
+  const yaContados = new Set(eventosHoy
+    .filter(e => e.tipo === 'ASIGNADO' || e.tipo === 'NUEVA_CONSULTA')
+    .map(e => clave(e.agente, e.numero)));
   const mailbox = CONFIG.MAILBOXES_EQUIPO.length ? CONFIG.MAILBOXES_EQUIPO.join(',') : undefined;
   const filas = equipo.agentes.filter(a => a.id).map(a => {
-    const n = CONFIG.ESTADOS_SIN_ATENDER.reduce((suma, estado) =>
-      suma + hsListarTodo_('/conversations', { status: estado, assigned_to: a.id, mailbox: mailbox }, 'conversations')
-        .filter(c => !yaContados.has(normalizarTexto(a.nombre) + '|' + c.number)).length, 0);
-    return [hoy, a.nombre, a.id, n, ahora];
+    const pendientes = new Set();
+    CONFIG.ESTADOS_SIN_ATENDER.forEach(estado =>
+      hsListarTodo_('/conversations', { status: estado, assigned_to: a.id, mailbox: mailbox }, 'conversations')
+        .forEach(c => { if (!yaContados.has(clave(a.nombre, c.number))) pendientes.add(c.number); }));
+    // Casos de días anteriores que la agente ya cerró hoy antes de la foto (madrugada o anoche):
+    // también eran trabajo pendiente al iniciar la jornada.
+    eventosHoy
+      .filter(e => e.tipo === 'CERRADO' && normalizarTexto(e.agente) === normalizarTexto(a.nombre) &&
+        !yaContados.has(clave(e.agente, e.numero)))
+      .forEach(e => pendientes.add(e.numero));
+    return [hoy, a.nombre, a.id, pendientes.size, ahora];
   });
   const hoja = hojaInterna_(ss, CONFIG.HOJAS.fotos, ['Día', 'Agente', 'ID agente HS', 'Sin atender', 'Tomada']);
   if (filas.length) hoja.getRange(hoja.getLastRow() + 1, 1, filas.length, filas[0].length).setValues(filas);
@@ -182,6 +191,7 @@ function guardarEventos_(hoja, eventos) {
     'https://secure.helpscout.net/conversation/' + e.conversacionId + '/' + e.numero,
   ]);
   hoja.getRange(hoja.getLastRow() + 1, 1, filas.length, COLUMNAS_EVENTOS.length).setValues(filas);
+  hoja.getRange(2, 3, hoja.getLastRow() - 1, 1).setNumberFormat('dd/MM/yyyy HH:mm');
 }
 
 /** Eventos guardados como objetos { dia, tipo, agente, minutos }. */

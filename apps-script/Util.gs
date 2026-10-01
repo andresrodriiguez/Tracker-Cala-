@@ -53,6 +53,17 @@ function minutosHabiles(inicioLocal, finLocal, horario) {
 }
 
 /**
+ * Tiempo de gestión en minutos: horario laboral, salvo que todo pase fuera de horario el mismo
+ * día (p. ej. asignado 7:45 y cerrado 7:55 → 10 min reales en vez de 0).
+ */
+function minutosGestion(inicioLocal, finLocal, horario) {
+  const habiles = minutosHabiles(inicioLocal, finLocal, horario);
+  if (habiles > 0) return habiles;
+  const mismoDia = inicioLocal.toISOString().slice(0, 10) === finLocal.toISOString().slice(0, 10);
+  return mismoDia ? Math.max(0, (finLocal - inicioLocal) / 60000) : 0;
+}
+
+/**
  * Día de jornada ('yyyy-MM-dd') al que pertenece un momento (hora local como campos UTC):
  * después del cierre de la jornada o en un día no laboral pasa al siguiente día laboral;
  * antes de la apertura cuenta para ese mismo día (si es laboral).

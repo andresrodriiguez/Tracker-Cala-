@@ -9,7 +9,7 @@ const contexto = vm.createContext({});
 ['Config.gs', 'Util.gs', 'Eventos.gs', 'Metricas.gs'].forEach(archivo => {
   vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'apps-script', archivo), 'utf8'), contexto, { filename: archivo });
 });
-const { derivarEventos, contarDia, colorSemaforo, estadisticasTiempo, diaDesdeCelda, mesDesdeNombreHoja, nombreHojaMes, normalizarTexto, minutosHabiles, diaDeJornada } = contexto;
+const { derivarEventos, contarDia, colorSemaforo, estadisticasTiempo, diaDesdeCelda, mesDesdeNombreHoja, nombreHojaMes, normalizarTexto, minutosHabiles, diaDeJornada, minutosGestion } = contexto;
 
 const JAIDETH = { id: 1, nombre: 'Jaideth Andocilla' };
 const EDNA = { id: 2, nombre: 'Edna Escudero' };
@@ -220,4 +220,11 @@ test('un caso asignado de noche cuenta como asignado del día siguiente', () => 
   }));
   assert.deepEqual(Array.from(evs, e => e.tipo + ':' + e.dia + ':' + e.minutos),
     ['ASIGNADO:2026-10-02:null', 'PRIMERA_RESPUESTA:2026-10-02:20', 'CERRADO:2026-10-02:20']);
+});
+
+test('tiempo de gestión: fuera de horario el mismo día cuenta minutos reales', () => {
+  assert.equal(minutosGestion(L('2026-10-01T07:45:00'), L('2026-10-01T07:55:00'), HORARIO), 10); // madrugada
+  assert.equal(minutosGestion(L('2026-10-01T16:50:00'), L('2026-10-02T09:10:00'), HORARIO), 20); // cruza la noche: horario laboral
+  assert.equal(minutosGestion(L('2026-10-01T18:00:00'), L('2026-10-02T08:00:00'), HORARIO), 0);  // noche → madrugada siguiente: 0
+  assert.equal(minutosGestion(L('2026-10-01T08:30:00'), L('2026-10-01T09:30:00'), HORARIO), 30); // parte dentro del horario
 });
