@@ -229,10 +229,17 @@ test('tiempo de gestión: fuera de horario el mismo día cuenta minutos reales',
   assert.equal(minutosGestion(L('2026-10-01T08:30:00'), L('2026-10-01T09:30:00'), HORARIO), 30); // parte dentro del horario
 });
 
-test('cerrar un caso sin asignar (spam, notificación) no cuenta como cerrado de nadie', () => {
+test('cerrar un caso sin asignar cuenta como asignado y cerrado para quien lo cierra', () => {
   const evs = derivarEventos(conv([
     cliente('2026-10-01T12:59:00Z', { assignedTo: null }),
     { id: siguienteId++, type: 'lineitem', status: 'closed', createdAt: '2026-10-01T13:03:00Z', createdBy: { id: ANDRES.id, type: 'user' }, assignedTo: null },
   ]), ctx());
-  assert.equal(evs.length, 0);
+  assert.deepEqual(tipos(evs), ['ASIGNADO:Andrés Rodríguez:2026-10-01', 'CERRADO:Andrés Rodríguez:2026-10-01']);
+  assert.equal(evs[1].minutos, 4);
+  // Un cierre automático (sin usuario) de un caso sin asignar no es de nadie
+  const auto = derivarEventos(conv([
+    cliente('2026-10-01T12:59:00Z', { assignedTo: null }),
+    { id: siguienteId++, type: 'lineitem', status: 'closed', createdAt: '2026-10-01T13:03:00Z', createdBy: { type: 'workflow' }, assignedTo: null },
+  ]), ctx());
+  assert.equal(auto.length, 0);
 });
