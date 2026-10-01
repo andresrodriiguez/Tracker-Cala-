@@ -20,6 +20,18 @@
  *   minutos(fin, inicio) → (opcional) minutos entre dos Date; por defecto minutos corridos
  * @return {Object[]} eventos
  */
+/**
+ * true si el último mensaje de la conversación (sin contar notas internas ni cambios de estado)
+ * es del cliente, es decir, el cliente está esperando respuesta.
+ */
+function ultimoMensajeEsDelCliente(hilos) {
+  const mensajes = (hilos || [])
+    .filter(h => (!h.state || h.state === 'published') && ['customer', 'message', 'chat', 'phone'].indexOf(h.type) >= 0)
+    .sort((a, b) => (new Date(a.createdAt) - new Date(b.createdAt)) || (a.id - b.id));
+  const ultimo = mensajes[mensajes.length - 1];
+  return !!ultimo && (ultimo.type === 'customer' || (ultimo.createdBy && ultimo.createdBy.type === 'customer'));
+}
+
 function derivarEventos(conv, ctx) {
   if (!conv || conv.status === 'spam') return [];
 

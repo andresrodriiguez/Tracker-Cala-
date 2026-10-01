@@ -39,6 +39,10 @@ const CONFIG = {
   // Estados de Help Scout que cuentan como "sin atender" en la foto de inicio de jornada.
   // 'active' = esperando respuesta del agente. Agrega 'pending' si también quieres contarlos.
   ESTADOS_SIN_ATENDER: ['active'],
+  // true: un caso en 'pending' cuyo ÚLTIMO mensaje es del cliente (la agente lo pasó a pending sin
+  // responder) también cuenta como "sin atender". Los pending donde la agente ya respondió y
+  // espera al cliente no cuentan.
+  CONTAR_PENDING_SIN_RESPONDER: true,
 
   // --- Cómo se detecta un "Ticket re-asignado a otro dep. CCH / COACH" ---
   // Siempre: cuando el caso pasa de un agente del equipo a un usuario/equipo de Help Scout
@@ -211,6 +215,18 @@ function mesDesdeNombreHoja(nombre) {
  *   minutos(fin, inicio) → (opcional) minutos entre dos Date; por defecto minutos corridos
  * @return {Object[]} eventos
  */
+/**
+ * true si el último mensaje de la conversación (sin contar notas internas ni cambios de estado)
+ * es del cliente, es decir, el cliente está esperando respuesta.
+ */
+function ultimoMensajeEsDelCliente(hilos) {
+  const mensajes = (hilos || [])
+    .filter(h => (!h.state || h.state === 'published') && ['customer', 'message', 'chat', 'phone'].indexOf(h.type) >= 0)
+    .sort((a, b) => (new Date(a.createdAt) - new Date(b.createdAt)) || (a.id - b.id));
+  const ultimo = mensajes[mensajes.length - 1];
+  return !!ultimo && (ultimo.type === 'customer' || (ultimo.createdBy && ultimo.createdBy.type === 'customer'));
+}
+
 function derivarEventos(conv, ctx) {
   if (!conv || conv.status === 'spam') return [];
 
@@ -654,6 +670,20 @@ function tomarFotoInicioJornada_(ss, equipo, forzar) {
     CONFIG.ESTADOS_SIN_ATENDER.forEach(estado =>
       hsListarTodo_('/conversations', { status: estado, assigned_to: a.id, mailbox: mailbox }, 'conversations')
         .forEach(c => { if (!yaContados.has(clave(a.nombre, c.number))) pendientes.add(c.number); }));
+    // Casos pasados a pending sin responder al cliente: siguen sin atender.
+    const pendingSinResponder = [];
+    if (CONFIG.CONTAR_PENDING_SIN_RESPONDER && CONFIG.ESTADOS_SIN_ATENDER.indexOf('pending') < 0) {
+      hsListarTodo_('/conversations', { status: 'pending', assigned_to: a.id, mailbox: mailbox, embed: 'threads' }, 'conversations')
+        .forEach(c => {
+          if (yaContados.has(clave(a.nombre, c.number)) || pendientes.has(c.number)) return;
+          let hilos = (c._embedded && c._embedded.threads) || [];
+          if (typeof c.threads === 'number' && c.threads > hilos.length) hilos = hsHilos_(c.id);
+          if (ultimoMensajeEsDelCliente(hilos)) {
+            pendientes.add(c.number);
+            pendingSinResponder.push(c.number);
+          }
+        });
+    }
     // Casos de días anteriores que la agente ya cerró hoy antes de la foto (madrugada o anoche):
     // también eran trabajo pendiente al iniciar la jornada.
     eventosHoy
@@ -661,9 +691,11 @@ function tomarFotoInicioJornada_(ss, equipo, forzar) {
         !yaContados.has(clave(e.agente, e.numero)))
       .forEach(e => pendientes.add(e.numero));
     const casos = Array.from(pendientes).sort((x, y) => x - y).map(n => '#' + n).join(', ');
-    return [hoy, a.nombre, a.id, pendientes.size, ahora, casos];
+    const estacionados = pendingSinResponder.sort((x, y) => x - y).map(n => '#' + n).join(', ');
+    return [hoy, a.nombre, a.id, pendientes.size, ahora, casos, estacionados];
   });
-  const encabezado = ['Día', 'Agente', 'ID agente HS', 'Sin atender', 'Tomada', 'Casos contados'];
+  const encabezado = ['Día', 'Agente', 'ID agente HS', 'Sin atender', 'Tomada', 'Casos contados',
+    'De ellos, en Pending sin responder'];
   const hoja = hojaInterna_(ss, CONFIG.HOJAS.fotos, encabezado);
   hoja.getRange(1, 1, 1, encabezado.length).setValues([encabezado]).setFontWeight('bold');
   if (filas.length) {

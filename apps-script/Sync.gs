@@ -147,6 +147,20 @@ function tomarFotoInicioJornada_(ss, equipo, forzar) {
     CONFIG.ESTADOS_SIN_ATENDER.forEach(estado =>
       hsListarTodo_('/conversations', { status: estado, assigned_to: a.id, mailbox: mailbox }, 'conversations')
         .forEach(c => { if (!yaContados.has(clave(a.nombre, c.number))) pendientes.add(c.number); }));
+    // Casos pasados a pending sin responder al cliente: siguen sin atender.
+    const pendingSinResponder = [];
+    if (CONFIG.CONTAR_PENDING_SIN_RESPONDER && CONFIG.ESTADOS_SIN_ATENDER.indexOf('pending') < 0) {
+      hsListarTodo_('/conversations', { status: 'pending', assigned_to: a.id, mailbox: mailbox, embed: 'threads' }, 'conversations')
+        .forEach(c => {
+          if (yaContados.has(clave(a.nombre, c.number)) || pendientes.has(c.number)) return;
+          let hilos = (c._embedded && c._embedded.threads) || [];
+          if (typeof c.threads === 'number' && c.threads > hilos.length) hilos = hsHilos_(c.id);
+          if (ultimoMensajeEsDelCliente(hilos)) {
+            pendientes.add(c.number);
+            pendingSinResponder.push(c.number);
+          }
+        });
+    }
     // Casos de días anteriores que la agente ya cerró hoy antes de la foto (madrugada o anoche):
     // también eran trabajo pendiente al iniciar la jornada.
     eventosHoy
@@ -154,9 +168,11 @@ function tomarFotoInicioJornada_(ss, equipo, forzar) {
         !yaContados.has(clave(e.agente, e.numero)))
       .forEach(e => pendientes.add(e.numero));
     const casos = Array.from(pendientes).sort((x, y) => x - y).map(n => '#' + n).join(', ');
-    return [hoy, a.nombre, a.id, pendientes.size, ahora, casos];
+    const estacionados = pendingSinResponder.sort((x, y) => x - y).map(n => '#' + n).join(', ');
+    return [hoy, a.nombre, a.id, pendientes.size, ahora, casos, estacionados];
   });
-  const encabezado = ['Día', 'Agente', 'ID agente HS', 'Sin atender', 'Tomada', 'Casos contados'];
+  const encabezado = ['Día', 'Agente', 'ID agente HS', 'Sin atender', 'Tomada', 'Casos contados',
+    'De ellos, en Pending sin responder'];
   const hoja = hojaInterna_(ss, CONFIG.HOJAS.fotos, encabezado);
   hoja.getRange(1, 1, 1, encabezado.length).setValues([encabezado]).setFontWeight('bold');
   if (filas.length) {

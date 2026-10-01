@@ -9,7 +9,7 @@ const contexto = vm.createContext({});
 ['Config.gs', 'Util.gs', 'Eventos.gs', 'Metricas.gs'].forEach(archivo => {
   vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'apps-script', archivo), 'utf8'), contexto, { filename: archivo });
 });
-const { derivarEventos, contarDia, colorSemaforo, estadisticasTiempo, diaDesdeCelda, mesDesdeNombreHoja, nombreHojaMes, normalizarTexto, minutosHabiles, diaDeJornada, minutosGestion } = contexto;
+const { derivarEventos, contarDia, colorSemaforo, estadisticasTiempo, diaDesdeCelda, mesDesdeNombreHoja, nombreHojaMes, normalizarTexto, minutosHabiles, diaDeJornada, minutosGestion, ultimoMensajeEsDelCliente } = contexto;
 
 const JAIDETH = { id: 1, nombre: 'Jaideth Andocilla' };
 const EDNA = { id: 2, nombre: 'Edna Escudero' };
@@ -242,4 +242,18 @@ test('cerrar un caso sin asignar cuenta como asignado y cerrado para quien lo ci
     { id: siguienteId++, type: 'lineitem', status: 'closed', createdAt: '2026-10-01T13:03:00Z', createdBy: { type: 'workflow' }, assignedTo: null },
   ]), ctx());
   assert.equal(auto.length, 0);
+});
+
+test('pending sin responder: el último mensaje (sin notas ni cambios de estado) es del cliente', () => {
+  const c = (t, extra) => Object.assign({ id: siguienteId++, type: 'customer', createdAt: t, createdBy: { type: 'customer' } }, extra);
+  const r = (t, extra) => Object.assign({ id: siguienteId++, type: 'message', createdAt: t, createdBy: { type: 'user', id: 1 } }, extra);
+  const nota = t => ({ id: siguienteId++, type: 'note', createdAt: t, createdBy: { type: 'user', id: 1 } });
+  const estado = t => ({ id: siguienteId++, type: 'lineitem', status: 'pending', createdAt: t, createdBy: { type: 'user', id: 1 } });
+  // Cliente escribió, la agente solo lo pasó a pending (y dejó una nota) → sin responder
+  assert.equal(ultimoMensajeEsDelCliente([c('2026-09-30T14:00:00Z'), nota('2026-09-30T15:00:00Z'), estado('2026-09-30T15:01:00Z')]), true);
+  // La agente respondió y lo dejó en pending esperando al cliente → legítimo
+  assert.equal(ultimoMensajeEsDelCliente([c('2026-09-30T14:00:00Z'), r('2026-09-30T15:00:00Z', { status: 'pending' })]), false);
+  // Un borrador de respuesta no cuenta como respuesta
+  assert.equal(ultimoMensajeEsDelCliente([c('2026-09-30T14:00:00Z'), r('2026-09-30T15:00:00Z', { state: 'draft' })]), true);
+  assert.equal(ultimoMensajeEsDelCliente([]), false);
 });

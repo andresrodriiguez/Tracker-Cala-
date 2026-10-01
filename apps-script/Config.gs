@@ -35,6 +35,10 @@ const CONFIG = {
   // Estados de Help Scout que cuentan como "sin atender" en la foto de inicio de jornada.
   // 'active' = esperando respuesta del agente. Agrega 'pending' si también quieres contarlos.
   ESTADOS_SIN_ATENDER: ['active'],
+  // true: un caso en 'pending' cuyo ÚLTIMO mensaje es del cliente (la agente lo pasó a pending sin
+  // responder) también cuenta como "sin atender". Los pending donde la agente ya respondió y
+  // espera al cliente no cuentan.
+  CONTAR_PENDING_SIN_RESPONDER: true,
 
   // --- Cómo se detecta un "Ticket re-asignado a otro dep. CCH / COACH" ---
   // Siempre: cuando el caso pasa de un agente del equipo a un usuario/equipo de Help Scout
