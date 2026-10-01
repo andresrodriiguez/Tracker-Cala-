@@ -17,12 +17,12 @@ Help Scout (API v2) ──cada 15 min──►  Apps Script  ──►  Hoja del
 
 | Columna del tracker | Cómo se calcula desde Help Scout |
 |---|---|
-| **Tickets sin atender al iniciar la jornada** (C) | "Foto" diaria al inicio de la jornada (9:00 am, hora de Miami): casos en estado *Active* asignados al agente, más los casos en *Pending* cuyo último mensaje es del cliente (pasados a Pending sin responder). Los Pending donde la agente ya respondió y espera al cliente no cuentan. |
+| **Tickets sin atender al iniciar la jornada** (C) | "Foto" diaria al inicio de la jornada (9:00 am, hora de Miami): casos en estado *Active* que entraron a la carga del agente **desde `FECHA_INICIO`** (asignados o con nueva consulta; el arrastre anterior no se cuenta), más los casos en *Pending* cuyo último mensaje es del cliente (pasados a Pending sin responder). Los Pending donde la agente ya respondió y espera al cliente no cuentan. |
 | **Tickets asignados en el día** (D) | Casos que quedaron asignados al agente ese día, ya sea que los asigne el líder o que el agente los tome. |
 | **Nueva consulta en ticket ya asignado** (E) | El cliente volvió a escribir en un caso que el agente tenía desde un día anterior y que ya había respondido, dejado en *Pending* o cerrado. Cuenta máximo 1 por caso por día. |
 | **Ticket re-asignados a otro dep. CCH / COACH** (F) | El caso pasó del agente a un usuario o equipo de Help Scout que **no** es del equipo SOP, o se movió a un buzón de otro departamento, o tiene una etiqueta configurada. Pasarlo a otro compañero del equipo también cuenta, porque así no le queda pendiente (se puede desactivar). |
 | **Total Tickets Gestionados (Auto)** (G) | **No se toca**: sigue siendo tu fórmula. |
-| **Tickets Cerrados** (H) | Casos que pasaron a *Closed* estando a cargo del agente. Si cierra un caso que estaba sin asignar, cuenta como asignado y cerrado para ella. |
+| **Tickets Cerrados** (H) | Casos que pasaron a *Closed* estando a cargo del agente. Si cierra un caso que estaba sin asignar, o uno de antes de `FECHA_INICIO`, cuenta como asignado y cerrado para ella ese día. |
 | **Tickets Pendientes/Seguimiento** (I) | `C + D + E − F − H` (mínimo 0). |
 | **% / Semáforo** y **Observaciones** | **No se tocan.** |
 

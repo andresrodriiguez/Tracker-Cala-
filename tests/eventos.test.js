@@ -257,3 +257,22 @@ test('pending sin responder: el último mensaje (sin notas ni cambios de estado)
   assert.equal(ultimoMensajeEsDelCliente([c('2026-09-30T14:00:00Z'), r('2026-09-30T15:00:00Z', { state: 'draft' })]), true);
   assert.equal(ultimoMensajeEsDelCliente([]), false);
 });
+
+test('cerrar un caso de antes de la automatización cuenta como asignado + cerrado ese día', () => {
+  const hilos = [
+    cliente('2026-09-25T13:00:00Z', { assignedTo: null }),
+    asignar('2026-09-25T13:10:00Z', JAIDETH.id),
+    respuesta('2026-10-01T11:30:00Z', JAIDETH.id, { status: 'closed' }),
+  ];
+  const evs = derivarEventos(conv(hilos), ctx({ fechaInicio: '2026-10-01' })).filter(e => e.dia >= '2026-10-01');
+  assert.deepEqual(tipos(evs), ['PRIMERA_RESPUESTA:Jaideth Andocilla:2026-10-01', 'ASIGNADO:Jaideth Andocilla:2026-10-01', 'CERRADO:Jaideth Andocilla:2026-10-01']);
+  // Si el cliente volvió a escribir desde FECHA_INICIO, ya estaba en su carga: solo cerrado
+  const conNueva = derivarEventos(conv([
+    cliente('2026-09-25T13:00:00Z', { assignedTo: null }),
+    asignar('2026-09-25T13:10:00Z', JAIDETH.id),
+    respuesta('2026-09-25T14:00:00Z', JAIDETH.id, { status: 'pending' }),
+    cliente('2026-10-01T10:00:00Z', { assignedTo: { id: JAIDETH.id } }),
+    respuesta('2026-10-02T11:30:00Z', JAIDETH.id, { status: 'closed' }),
+  ]), ctx({ fechaInicio: '2026-10-01' })).filter(e => e.dia >= '2026-10-01');
+  assert.deepEqual(tipos(conNueva), ['NUEVA_CONSULTA:Jaideth Andocilla:2026-10-01', 'CERRADO:Jaideth Andocilla:2026-10-02']);
+});

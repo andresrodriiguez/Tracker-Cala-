@@ -40,6 +40,7 @@ function sincronizar_() {
     mailboxesEquipo: CONFIG.MAILBOXES_EQUIPO,
     tagsReasignacion: CONFIG.TAGS_REASIGNACION,
     transferenciaInternaEsReasignacion: CONFIG.TRANSFERENCIA_INTERNA_ES_REASIGNACION,
+    fechaInicio: CONFIG.FECHA_INICIO,
     minutos: (fin, inicio) => minutosGestion(relojLocal_(inicio, tz), relojLocal_(fin, tz), CONFIG.HORARIO_LABORAL),
   };
 
@@ -136,8 +137,14 @@ function tomarFotoInicioJornada_(ss, equipo, forzar) {
 
   // Los casos que ya cuentan hoy como "asignados" o "nueva consulta" (p. ej. asignados anoche)
   // no se cuentan otra vez como "sin atender".
-  const eventosHoy = leerEventos_(ss).filter(e => e.dia === hoy);
+  const eventos = leerEventos_(ss);
+  const eventosHoy = eventos.filter(e => e.dia === hoy);
   const clave = (agente, numero) => normalizarTexto(agente) + '|' + numero;
+  // Solo cuentan casos que entraron a la carga de la agente desde FECHA_INICIO (el arrastre de
+  // antes de la automatización no es confiable).
+  const enCarga = new Set(eventos
+    .filter(e => e.tipo === 'ASIGNADO' || e.tipo === 'NUEVA_CONSULTA')
+    .map(e => clave(e.agente, e.numero)));
   const yaContados = new Set(eventosHoy
     .filter(e => e.tipo === 'ASIGNADO' || e.tipo === 'NUEVA_CONSULTA')
     .map(e => clave(e.agente, e.numero)));
@@ -146,13 +153,17 @@ function tomarFotoInicioJornada_(ss, equipo, forzar) {
     const pendientes = new Set();
     CONFIG.ESTADOS_SIN_ATENDER.forEach(estado =>
       hsListarTodo_('/conversations', { status: estado, assigned_to: a.id, mailbox: mailbox }, 'conversations')
-        .forEach(c => { if (!yaContados.has(clave(a.nombre, c.number))) pendientes.add(c.number); }));
+        .forEach(c => {
+          const k = clave(a.nombre, c.number);
+          if (enCarga.has(k) && !yaContados.has(k)) pendientes.add(c.number);
+        }));
     // Casos pasados a pending sin responder al cliente: siguen sin atender.
     const pendingSinResponder = [];
     if (CONFIG.CONTAR_PENDING_SIN_RESPONDER && CONFIG.ESTADOS_SIN_ATENDER.indexOf('pending') < 0) {
       hsListarTodo_('/conversations', { status: 'pending', assigned_to: a.id, mailbox: mailbox, embed: 'threads' }, 'conversations')
         .forEach(c => {
-          if (yaContados.has(clave(a.nombre, c.number)) || pendientes.has(c.number)) return;
+          const k = clave(a.nombre, c.number);
+          if (!enCarga.has(k) || yaContados.has(k) || pendientes.has(c.number)) return;
           let hilos = (c._embedded && c._embedded.threads) || [];
           if (typeof c.threads === 'number' && c.threads > hilos.length) hilos = hsHilos_(c.id);
           if (ultimoMensajeEsDelCliente(hilos)) {
@@ -165,7 +176,7 @@ function tomarFotoInicioJornada_(ss, equipo, forzar) {
     // también eran trabajo pendiente al iniciar la jornada.
     eventosHoy
       .filter(e => e.tipo === 'CERRADO' && normalizarTexto(e.agente) === normalizarTexto(a.nombre) &&
-        !yaContados.has(clave(e.agente, e.numero)))
+        enCarga.has(clave(e.agente, e.numero)) && !yaContados.has(clave(e.agente, e.numero)))
       .forEach(e => pendientes.add(e.numero));
     const casos = Array.from(pendientes).sort((x, y) => x - y).map(n => '#' + n).join(', ');
     const estacionados = pendingSinResponder.sort((x, y) => x - y).map(n => '#' + n).join(', ');

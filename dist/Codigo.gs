@@ -213,6 +213,8 @@ function mesDesdeNombreHoja(nombre) {
  *   tagsReasignacion → string[]
  *   transferenciaInternaEsReasignacion → boolean
  *   minutos(fin, inicio) → (opcional) minutos entre dos Date; por defecto minutos corridos
+ *   fechaInicio      → (opcional) 'yyyy-MM-dd'; cerrar un caso que entró a la carga antes de esta
+ *                      fecha cuenta como asignado + cerrado ese día
  * @return {Object[]} eventos
  */
 /**
@@ -264,6 +266,7 @@ function derivarEventos(conv, ctx) {
   let estado = null;
   let esperandoAgente = true;     // el último mensaje relevante fue del cliente
   let diaAsignacion = null;
+  let diaEntrada = null;          // último día en que el caso entró a la carga (asignación o nueva consulta)
   let inicioAsignacion = null;
   let inicioCiclo = null;         // desde cuándo se mide la resolución (asignación o reapertura)
   let primeraRespuestaPendiente = false;
@@ -285,6 +288,7 @@ function derivarEventos(conv, ctx) {
       emitir('ASIGNADO', 'A-' + nuevo.id + '-' + dia, nuevo, fecha);
       ultimoAgenteEquipo = nuevo;
       diaAsignacion = dia;
+      diaEntrada = dia;
       inicioAsignacion = fecha;
       inicioCiclo = fecha;
       primeraRespuestaPendiente = true;
@@ -312,6 +316,7 @@ function derivarEventos(conv, ctx) {
       const yaAtendido = estadoPrevio === 'closed' || estadoPrevio === 'pending' || !esperandoAgente;
       if (agente && diaAsignacion !== dia && yaAtendido) {
         emitir('NUEVA_CONSULTA', 'N-' + agente.id + '-' + dia, agente, fecha);
+        diaEntrada = dia;
       }
       esperandoAgente = true;
     }
@@ -344,11 +349,12 @@ function derivarEventos(conv, ctx) {
     if (nuevoEstado === 'closed' && estadoPrevio !== 'closed') {
       // Si el caso estaba sin asignar y lo cerró una agente del equipo, lo tomó y lo resolvió:
       // cuenta como asignado y cerrado para ella (no como "sin atender").
+      // Si el caso estaba sin asignar, o es anterior a la automatización (ctx.fechaInicio) y no
+      // está en la carga registrada de la agente, cuenta como asignado y cerrado ese día.
       let agente = agenteDe(asignado);
-      if (!agente && autor.type === 'user') {
-        agente = ctx.agentePorId(Number(autor.id));
-        if (agente) emitir('ASIGNADO', 'A-' + agente.id + '-' + dia, agente, fecha);
-      }
+      const fueraDeCarga = !agente || (ctx.fechaInicio && !(diaEntrada >= ctx.fechaInicio));
+      if (!agente && autor.type === 'user') agente = ctx.agentePorId(Number(autor.id));
+      if (agente && fueraDeCarga) emitir('ASIGNADO', 'A-' + agente.id + '-' + dia, agente, fecha);
       if (agente) {
         emitir('CERRADO', 'C-' + h.id, agente, fecha,
           minutosEntre(fecha, inicioCiclo || new Date(conv.createdAt)));
@@ -563,6 +569,7 @@ function sincronizar_() {
     mailboxesEquipo: CONFIG.MAILBOXES_EQUIPO,
     tagsReasignacion: CONFIG.TAGS_REASIGNACION,
     transferenciaInternaEsReasignacion: CONFIG.TRANSFERENCIA_INTERNA_ES_REASIGNACION,
+    fechaInicio: CONFIG.FECHA_INICIO,
     minutos: (fin, inicio) => minutosGestion(relojLocal_(inicio, tz), relojLocal_(fin, tz), CONFIG.HORARIO_LABORAL),
   };
 
@@ -659,8 +666,14 @@ function tomarFotoInicioJornada_(ss, equipo, forzar) {
 
   // Los casos que ya cuentan hoy como "asignados" o "nueva consulta" (p. ej. asignados anoche)
   // no se cuentan otra vez como "sin atender".
-  const eventosHoy = leerEventos_(ss).filter(e => e.dia === hoy);
+  const eventos = leerEventos_(ss);
+  const eventosHoy = eventos.filter(e => e.dia === hoy);
   const clave = (agente, numero) => normalizarTexto(agente) + '|' + numero;
+  // Solo cuentan casos que entraron a la carga de la agente desde FECHA_INICIO (el arrastre de
+  // antes de la automatización no es confiable).
+  const enCarga = new Set(eventos
+    .filter(e => e.tipo === 'ASIGNADO' || e.tipo === 'NUEVA_CONSULTA')
+    .map(e => clave(e.agente, e.numero)));
   const yaContados = new Set(eventosHoy
     .filter(e => e.tipo === 'ASIGNADO' || e.tipo === 'NUEVA_CONSULTA')
     .map(e => clave(e.agente, e.numero)));
@@ -669,13 +682,17 @@ function tomarFotoInicioJornada_(ss, equipo, forzar) {
     const pendientes = new Set();
     CONFIG.ESTADOS_SIN_ATENDER.forEach(estado =>
       hsListarTodo_('/conversations', { status: estado, assigned_to: a.id, mailbox: mailbox }, 'conversations')
-        .forEach(c => { if (!yaContados.has(clave(a.nombre, c.number))) pendientes.add(c.number); }));
+        .forEach(c => {
+          const k = clave(a.nombre, c.number);
+          if (enCarga.has(k) && !yaContados.has(k)) pendientes.add(c.number);
+        }));
     // Casos pasados a pending sin responder al cliente: siguen sin atender.
     const pendingSinResponder = [];
     if (CONFIG.CONTAR_PENDING_SIN_RESPONDER && CONFIG.ESTADOS_SIN_ATENDER.indexOf('pending') < 0) {
       hsListarTodo_('/conversations', { status: 'pending', assigned_to: a.id, mailbox: mailbox, embed: 'threads' }, 'conversations')
         .forEach(c => {
-          if (yaContados.has(clave(a.nombre, c.number)) || pendientes.has(c.number)) return;
+          const k = clave(a.nombre, c.number);
+          if (!enCarga.has(k) || yaContados.has(k) || pendientes.has(c.number)) return;
           let hilos = (c._embedded && c._embedded.threads) || [];
           if (typeof c.threads === 'number' && c.threads > hilos.length) hilos = hsHilos_(c.id);
           if (ultimoMensajeEsDelCliente(hilos)) {
@@ -688,7 +705,7 @@ function tomarFotoInicioJornada_(ss, equipo, forzar) {
     // también eran trabajo pendiente al iniciar la jornada.
     eventosHoy
       .filter(e => e.tipo === 'CERRADO' && normalizarTexto(e.agente) === normalizarTexto(a.nombre) &&
-        !yaContados.has(clave(e.agente, e.numero)))
+        enCarga.has(clave(e.agente, e.numero)) && !yaContados.has(clave(e.agente, e.numero)))
       .forEach(e => pendientes.add(e.numero));
     const casos = Array.from(pendientes).sort((x, y) => x - y).map(n => '#' + n).join(', ');
     const estacionados = pendingSinResponder.sort((x, y) => x - y).map(n => '#' + n).join(', ');
