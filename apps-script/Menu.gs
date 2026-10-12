@@ -129,7 +129,10 @@ function menuReiniciar() {
     const hoja = ss.getSheetByName(CONFIG.HOJAS.eventos);
     if (hoja && hoja.getLastRow() > 1) hoja.getRange(2, 1, hoja.getLastRow() - 1, hoja.getLastColumn()).clearContent();
     const props = PropertiesService.getScriptProperties();
-    props.deleteProperty('HS_ESTADO_SYNC');
+    const tz = ss.getSpreadsheetTimeZone();
+    props.setProperty('HS_ESTADO_SYNC', JSON.stringify({
+      desde: hsFechaIso_(Utilities.parseDate(CONFIG.FECHA_INICIO, tz, 'yyyy-MM-dd')), pagina: 1, recalculando: true,
+    }));
     props.deleteProperty('HS_FOTO_DIA');
     CacheService.getScriptCache().remove('HS_USUARIOS');
     sincronizar_();
@@ -138,7 +141,8 @@ function menuReiniciar() {
   }
   const pendiente = JSON.parse(PropertiesService.getScriptProperties().getProperty('HS_ESTADO_SYNC') || 'null');
   ui.alert(pendiente && pendiente.pagina > 1
-    ? 'Recalculando… Help Scout tiene muchos casos: la sincronización automática termina de leerlos en los próximos minutos.'
+    ? 'Recalculando… Help Scout tiene muchos casos: la sincronización automática termina de leerlos en los próximos minutos ' +
+      'y recién ahí actualiza la hoja. Revisa "Help Scout → Ver estado" en unos 15-30 minutos.'
     : '✅ Listo: todo recalculado desde ' + CONFIG.FECHA_INICIO + '.');
 }
 

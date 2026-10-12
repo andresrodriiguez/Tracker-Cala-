@@ -9,7 +9,7 @@ const contexto = vm.createContext({});
 ['Config.gs', 'Util.gs', 'Eventos.gs', 'Metricas.gs'].forEach(archivo => {
   vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'apps-script', archivo), 'utf8'), contexto, { filename: archivo });
 });
-const { derivarEventos, contarDia, colorSemaforo, estadisticasTiempo, diaDesdeCelda, mesDesdeNombreHoja, nombreHojaMes, normalizarTexto, minutosHabiles, diaDeJornada, minutosGestion, ultimoMensajeEsDelCliente } = contexto;
+const { derivarEventos, contarDia, colorSemaforo, estadisticasTiempo, diaDesdeCelda, mesDesdeNombreHoja, nombreHojaMes, normalizarTexto, minutosHabiles, diaDeJornada, minutosGestion, ultimoMensajeEsDelCliente, diasEntre } = contexto;
 
 const JAIDETH = { id: 1, nombre: 'Jaideth Andocilla' };
 const EDNA = { id: 2, nombre: 'Edna Escudero' };
@@ -275,4 +275,37 @@ test('cerrar un caso de antes de la automatización cuenta como asignado + cerra
     respuesta('2026-10-02T11:30:00Z', JAIDETH.id, { status: 'closed' }),
   ]), ctx({ fechaInicio: '2026-10-01' })).filter(e => e.dia >= '2026-10-01');
   assert.deepEqual(tipos(conNueva), ['NUEVA_CONSULTA:Jaideth Andocilla:2026-10-01', 'CERRADO:Jaideth Andocilla:2026-10-02']);
+});
+
+test('contarDia: cada caso cuenta una vez y lo cerrado siempre está dentro del total', () => {
+  const ev = (tipo, numero) => ({ tipo, numero });
+  // Caso #1 asignado hoy y cerrado dos veces (cliente respondió "gracias" y se volvió a cerrar)
+  // Caso #50 estaba en la foto de las 9:00 y se cerró. Caso #70 estaba en pending desde ayer y se cerró.
+  const m = contarDia([ev('ASIGNADO', 1), ev('CERRADO', 1), ev('CERRADO', 1), ev('CERRADO', 50), ev('CERRADO', 70)],
+    { total: 2, casos: ['50', '60'] });
+  assert.equal(m.asignados, 1);
+  assert.equal(m.cerrados, 3);          // #1, #50, #70
+  assert.equal(m.sinAtender, 3);        // foto (2) + #70 cerrado hoy que no estaba en la foto
+  assert.equal(m.total, 4);             // 3 + 1
+  assert.equal(m.pendientes, 1);        // #60 sigue abierto
+  assert.ok(m.cerrados <= m.total);
+});
+
+test('los cierres automáticos de Help Scout no cuentan; los manuales (incluido flujo manual) sí', () => {
+  const base = () => [
+    cliente('2026-10-01T13:00:00Z', { assignedTo: null }),
+    asignar('2026-10-01T13:10:00Z', JAIDETH.id),
+    respuesta('2026-10-01T13:30:00Z', JAIDETH.id, { status: 'pending' }),
+  ];
+  const auto = derivarEventos(conv(base().concat([{ id: siguienteId++, type: 'lineitem', status: 'closed', createdAt: '2026-10-04T13:00:00Z', createdBy: { type: 'workflow' }, action: { type: 'automatic-workflow' }, assignedTo: { id: JAIDETH.id } }])), ctx());
+  assert.equal(auto.filter(e => e.tipo === 'CERRADO').length, 0);
+  const autoUsuario = derivarEventos(conv(base().concat([{ id: siguienteId++, type: 'lineitem', status: 'closed', createdAt: '2026-10-04T13:00:00Z', createdBy: { type: 'user', id: 1 }, action: { type: 'automatic-workflow' }, assignedTo: { id: JAIDETH.id } }])), ctx());
+  assert.equal(autoUsuario.filter(e => e.tipo === 'CERRADO').length, 0);
+  const manual = derivarEventos(conv(base().concat([{ id: siguienteId++, type: 'lineitem', status: 'closed', createdAt: '2026-10-02T13:00:00Z', createdBy: { type: 'user', id: JAIDETH.id }, action: { type: 'manual-workflow' }, assignedTo: { id: JAIDETH.id } }])), ctx());
+  assert.equal(manual.filter(e => e.tipo === 'CERRADO').length, 1);
+});
+
+test('diasEntre', () => {
+  assert.deepEqual(Array.from(diasEntre('2026-09-29', '2026-10-02')), ['2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02']);
+  assert.deepEqual(Array.from(diasEntre('2026-10-01', '2026-10-01')), ['2026-10-01']);
 });

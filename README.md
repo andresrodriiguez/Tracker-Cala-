@@ -24,6 +24,8 @@ Help Scout (API v2) ──cada 15 min──►  Apps Script  ──►  Hoja del
 | **Total Tickets Gestionados (Auto)** (G) | **No se toca**: sigue siendo tu fórmula. |
 | **Tickets Cerrados** (H) | Casos que pasaron a *Closed* estando a cargo del agente. Si cierra un caso que estaba sin asignar, o uno de antes de `FECHA_INICIO`, cuenta como asignado y cerrado para ella ese día. |
 | **Tickets Pendientes/Seguimiento** (I) | `C + D + E − F − H` (mínimo 0). |
+
+Cada caso cuenta **una sola vez por día** en cada columna. Si una agente cierra un caso de un día anterior que no estaba en la foto de las 9:00 (por ejemplo, estaba en *Pending* esperando al cliente), ese caso se suma a la columna C, para que todo lo cerrado esté dentro del Total y el % no pase de 100%. Los **cierres automáticos** de Help Scout (reglas que cierran solos los casos) no cuentan.
 | **% / Semáforo** y **Observaciones** | **No se tocan.** |
 
 Reglas importantes:

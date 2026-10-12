@@ -156,9 +156,11 @@ function derivarEventos(conv, ctx) {
       // cuenta como asignado y cerrado para ella (no como "sin atender").
       // Si el caso estaba sin asignar, o es anterior a la automatización (ctx.fechaInicio) y no
       // está en la carga registrada de la agente, cuenta como asignado y cerrado ese día.
-      let agente = agenteDe(asignado);
+      // Los cierres automáticos de Help Scout (reglas que cierran solos los pending) no cuentan.
+      const cierreAutomatico = autor.type !== 'user' || /automatic/i.test(accion);
+      let agente = cierreAutomatico ? null : agenteDe(asignado);
       const fueraDeCarga = !agente || (ctx.fechaInicio && !(diaEntrada >= ctx.fechaInicio));
-      if (!agente && autor.type === 'user') agente = ctx.agentePorId(Number(autor.id));
+      if (!agente && !cierreAutomatico) agente = ctx.agentePorId(Number(autor.id));
       if (agente && fueraDeCarga) emitir('ASIGNADO', 'A-' + agente.id + '-' + dia, agente, fecha);
       if (agente) {
         emitir('CERRADO', 'C-' + h.id, agente, fecha,

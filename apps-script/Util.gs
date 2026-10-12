@@ -77,6 +77,15 @@ function diaDeJornada(local, horario) {
   return new Date(d).toISOString().slice(0, 10);
 }
 
+/** Todos los días 'yyyy-MM-dd' entre desde y hasta (incluidos). */
+function diasEntre(desde, hasta) {
+  const dias = [];
+  for (let d = new Date(desde + 'T00:00:00Z'); d.toISOString().slice(0, 10) <= hasta; d.setUTCDate(d.getUTCDate() + 1)) {
+    dias.push(d.toISOString().slice(0, 10));
+  }
+  return dias;
+}
+
 /** 'A' → 1, 'L' → 12, 'AA' → 27 */
 function indiceColumna(letra) {
   return String(letra).toUpperCase().split('').reduce((n, c) => n * 26 + c.charCodeAt(0) - 64, 0);

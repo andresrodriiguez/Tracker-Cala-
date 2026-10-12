@@ -174,6 +174,15 @@ function diaDeJornada(local, horario) {
   return new Date(d).toISOString().slice(0, 10);
 }
 
+/** Todos los días 'yyyy-MM-dd' entre desde y hasta (incluidos). */
+function diasEntre(desde, hasta) {
+  const dias = [];
+  for (let d = new Date(desde + 'T00:00:00Z'); d.toISOString().slice(0, 10) <= hasta; d.setUTCDate(d.getUTCDate() + 1)) {
+    dias.push(d.toISOString().slice(0, 10));
+  }
+  return dias;
+}
+
 /** 'A' → 1, 'L' → 12, 'AA' → 27 */
 function indiceColumna(letra) {
   return String(letra).toUpperCase().split('').reduce((n, c) => n * 26 + c.charCodeAt(0) - 64, 0);
@@ -351,9 +360,11 @@ function derivarEventos(conv, ctx) {
       // cuenta como asignado y cerrado para ella (no como "sin atender").
       // Si el caso estaba sin asignar, o es anterior a la automatización (ctx.fechaInicio) y no
       // está en la carga registrada de la agente, cuenta como asignado y cerrado ese día.
-      let agente = agenteDe(asignado);
+      // Los cierres automáticos de Help Scout (reglas que cierran solos los pending) no cuentan.
+      const cierreAutomatico = autor.type !== 'user' || /automatic/i.test(accion);
+      let agente = cierreAutomatico ? null : agenteDe(asignado);
       const fueraDeCarga = !agente || (ctx.fechaInicio && !(diaEntrada >= ctx.fechaInicio));
-      if (!agente && autor.type === 'user') agente = ctx.agentePorId(Number(autor.id));
+      if (!agente && !cierreAutomatico) agente = ctx.agentePorId(Number(autor.id));
       if (agente && fueraDeCarga) emitir('ASIGNADO', 'A-' + agente.id + '-' + dia, agente, fecha);
       if (agente) {
         emitir('CERRADO', 'C-' + h.id, agente, fecha,
@@ -384,17 +395,37 @@ function derivarEventos(conv, ctx) {
  * Métricas de un agente en un día, con las mismas reglas del tracker:
  *   Total gestionados = sin atender al inicio + asignados + nuevas consultas − re-asignados
  *   Pendientes        = Total gestionados − cerrados (mínimo 0)
+ * Cada caso cuenta una sola vez por tipo y día. Un caso de días anteriores que se cierra hoy y no
+ * estaba en la foto (p. ej. estaba en pending esperando al cliente) se suma a "sin atender", para
+ * que todo lo cerrado esté dentro del total y el % no pase de 100%.
  * @param {Object[]} eventos  eventos de ESE agente en ESE día
- * @param {number} sinAtender foto de inicio de jornada (0 si no hay)
+ * @param {number|{total: number, casos: Array}} foto  foto de inicio de jornada (0/null si no hay)
  */
-function contarDia(eventos, sinAtender) {
-  const c = { sinAtender: Number(sinAtender) || 0, asignados: 0, nuevaConsulta: 0, reasignados: 0, cerrados: 0 };
-  eventos.forEach(e => {
-    if (e.tipo === 'ASIGNADO') c.asignados++;
-    else if (e.tipo === 'NUEVA_CONSULTA') c.nuevaConsulta++;
-    else if (e.tipo === 'REASIGNADO') c.reasignados++;
-    else if (e.tipo === 'CERRADO') c.cerrados++;
+function contarDia(eventos, foto) {
+  const casos = tipo => {
+    const s = new Set();
+    eventos.forEach((e, i) => {
+      if (e.tipo !== tipo) return;
+      s.add(e.numero != null && e.numero !== '' && !isNaN(e.numero) ? String(e.numero) : 'evento-' + i);
+    });
+    return s;
+  };
+  const asignados = casos('ASIGNADO');
+  const nuevas = casos('NUEVA_CONSULTA');
+  const cerrados = casos('CERRADO');
+  const fotoTotal = typeof foto === 'number' ? foto : (foto && Number(foto.total)) || 0;
+  const fotoCasos = foto && foto.casos ? new Set(foto.casos.map(String)) : new Set();
+  let cerradosDeAntes = 0;
+  cerrados.forEach(n => {
+    if (n.indexOf('evento-') !== 0 && !asignados.has(n) && !nuevas.has(n) && !fotoCasos.has(n)) cerradosDeAntes++;
   });
+  const c = {
+    sinAtender: fotoTotal + cerradosDeAntes,
+    asignados: asignados.size,
+    nuevaConsulta: nuevas.size,
+    reasignados: casos('REASIGNADO').size,
+    cerrados: cerrados.size,
+  };
   c.total = c.sinAtender + c.asignados + c.nuevaConsulta - c.reasignados;
   c.pendientes = Math.max(0, c.total - c.cerrados);
   c.hayActividad = c.asignados + c.nuevaConsulta + c.reasignados + c.cerrados > 0;
@@ -562,6 +593,7 @@ function sincronizar_() {
     pagina: 1,
   };
   if (estado.pagina === 1) estado.inicioCorrida = hsFechaIso_(new Date());
+  const recalculando = !!estado.recalculando; // "Recalcular todo": la hoja se escribe al terminar de leer
 
   const ctx = {
     agentePorId: id => equipo.porId[id] || null,
@@ -611,10 +643,13 @@ function sincronizar_() {
   }
   props.setProperty('HS_ESTADO_SYNC', JSON.stringify(estado));
 
-  const diasTocados = new Set(nuevos.map(e => e.dia));
+  const diasTocados = new Set(recalculando ? [] : nuevos.map(e => e.dia));
   // La foto se toma solo con la lectura completa, para descontar bien lo que ya cuenta hoy.
   const foto = terminado ? tomarFotoInicioJornada_(ss, equipo, false) : null;
   if (foto) diasTocados.add(foto);
+  if (recalculando && terminado) {
+    diasEntre(CONFIG.FECHA_INICIO, Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd')).forEach(d => diasTocados.add(d));
+  }
 
   if (diasTocados.size) {
     actualizarTracker_(ss, Array.from(diasTocados).sort(), equipo);
@@ -772,14 +807,19 @@ function leerEventos_(ss) {
   }));
 }
 
-/** Foto de inicio de jornada por 'día|agente' (la última tomada gana). */
+/** Foto de inicio de jornada por 'día|agente' → { total, casos } (la última tomada gana). */
 function leerFotos_(ss) {
   const hoja = ss.getSheetByName(CONFIG.HOJAS.fotos);
   const fotos = {};
   if (!hoja) return fotos;
   const tz = ss.getSpreadsheetTimeZone();
   const formatear = f => Utilities.formatDate(f, tz, 'yyyy-MM-dd');
-  leerFilas_(hoja).forEach(f => { fotos[diaDesdeCelda(f[0], formatear) + '|' + normalizarTexto(f[1])] = Number(f[3]) || 0; });
+  leerFilas_(hoja).forEach(f => {
+    fotos[diaDesdeCelda(f[0], formatear) + '|' + normalizarTexto(f[1])] = {
+      total: Number(f[3]) || 0,
+      casos: (String(f[5] || '').match(/\d+/g) || []),
+    };
+  });
   return fotos;
 }
 
@@ -1176,7 +1216,10 @@ function menuReiniciar() {
     const hoja = ss.getSheetByName(CONFIG.HOJAS.eventos);
     if (hoja && hoja.getLastRow() > 1) hoja.getRange(2, 1, hoja.getLastRow() - 1, hoja.getLastColumn()).clearContent();
     const props = PropertiesService.getScriptProperties();
-    props.deleteProperty('HS_ESTADO_SYNC');
+    const tz = ss.getSpreadsheetTimeZone();
+    props.setProperty('HS_ESTADO_SYNC', JSON.stringify({
+      desde: hsFechaIso_(Utilities.parseDate(CONFIG.FECHA_INICIO, tz, 'yyyy-MM-dd')), pagina: 1, recalculando: true,
+    }));
     props.deleteProperty('HS_FOTO_DIA');
     CacheService.getScriptCache().remove('HS_USUARIOS');
     sincronizar_();
@@ -1185,7 +1228,8 @@ function menuReiniciar() {
   }
   const pendiente = JSON.parse(PropertiesService.getScriptProperties().getProperty('HS_ESTADO_SYNC') || 'null');
   ui.alert(pendiente && pendiente.pagina > 1
-    ? 'Recalculando… Help Scout tiene muchos casos: la sincronización automática termina de leerlos en los próximos minutos.'
+    ? 'Recalculando… Help Scout tiene muchos casos: la sincronización automática termina de leerlos en los próximos minutos ' +
+      'y recién ahí actualiza la hoja. Revisa "Help Scout → Ver estado" en unos 15-30 minutos.'
     : '✅ Listo: todo recalculado desde ' + CONFIG.FECHA_INICIO + '.');
 }
 

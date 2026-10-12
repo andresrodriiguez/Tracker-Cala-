@@ -6,17 +6,37 @@
  * Métricas de un agente en un día, con las mismas reglas del tracker:
  *   Total gestionados = sin atender al inicio + asignados + nuevas consultas − re-asignados
  *   Pendientes        = Total gestionados − cerrados (mínimo 0)
+ * Cada caso cuenta una sola vez por tipo y día. Un caso de días anteriores que se cierra hoy y no
+ * estaba en la foto (p. ej. estaba en pending esperando al cliente) se suma a "sin atender", para
+ * que todo lo cerrado esté dentro del total y el % no pase de 100%.
  * @param {Object[]} eventos  eventos de ESE agente en ESE día
- * @param {number} sinAtender foto de inicio de jornada (0 si no hay)
+ * @param {number|{total: number, casos: Array}} foto  foto de inicio de jornada (0/null si no hay)
  */
-function contarDia(eventos, sinAtender) {
-  const c = { sinAtender: Number(sinAtender) || 0, asignados: 0, nuevaConsulta: 0, reasignados: 0, cerrados: 0 };
-  eventos.forEach(e => {
-    if (e.tipo === 'ASIGNADO') c.asignados++;
-    else if (e.tipo === 'NUEVA_CONSULTA') c.nuevaConsulta++;
-    else if (e.tipo === 'REASIGNADO') c.reasignados++;
-    else if (e.tipo === 'CERRADO') c.cerrados++;
+function contarDia(eventos, foto) {
+  const casos = tipo => {
+    const s = new Set();
+    eventos.forEach((e, i) => {
+      if (e.tipo !== tipo) return;
+      s.add(e.numero != null && e.numero !== '' && !isNaN(e.numero) ? String(e.numero) : 'evento-' + i);
+    });
+    return s;
+  };
+  const asignados = casos('ASIGNADO');
+  const nuevas = casos('NUEVA_CONSULTA');
+  const cerrados = casos('CERRADO');
+  const fotoTotal = typeof foto === 'number' ? foto : (foto && Number(foto.total)) || 0;
+  const fotoCasos = foto && foto.casos ? new Set(foto.casos.map(String)) : new Set();
+  let cerradosDeAntes = 0;
+  cerrados.forEach(n => {
+    if (n.indexOf('evento-') !== 0 && !asignados.has(n) && !nuevas.has(n) && !fotoCasos.has(n)) cerradosDeAntes++;
   });
+  const c = {
+    sinAtender: fotoTotal + cerradosDeAntes,
+    asignados: asignados.size,
+    nuevaConsulta: nuevas.size,
+    reasignados: casos('REASIGNADO').size,
+    cerrados: cerrados.size,
+  };
   c.total = c.sinAtender + c.asignados + c.nuevaConsulta - c.reasignados;
   c.pendientes = Math.max(0, c.total - c.cerrados);
   c.hayActividad = c.asignados + c.nuevaConsulta + c.reasignados + c.cerrados > 0;

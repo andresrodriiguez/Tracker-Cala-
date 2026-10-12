@@ -33,6 +33,7 @@ function sincronizar_() {
     pagina: 1,
   };
   if (estado.pagina === 1) estado.inicioCorrida = hsFechaIso_(new Date());
+  const recalculando = !!estado.recalculando; // "Recalcular todo": la hoja se escribe al terminar de leer
 
   const ctx = {
     agentePorId: id => equipo.porId[id] || null,
@@ -82,10 +83,13 @@ function sincronizar_() {
   }
   props.setProperty('HS_ESTADO_SYNC', JSON.stringify(estado));
 
-  const diasTocados = new Set(nuevos.map(e => e.dia));
+  const diasTocados = new Set(recalculando ? [] : nuevos.map(e => e.dia));
   // La foto se toma solo con la lectura completa, para descontar bien lo que ya cuenta hoy.
   const foto = terminado ? tomarFotoInicioJornada_(ss, equipo, false) : null;
   if (foto) diasTocados.add(foto);
+  if (recalculando && terminado) {
+    diasEntre(CONFIG.FECHA_INICIO, Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd')).forEach(d => diasTocados.add(d));
+  }
 
   if (diasTocados.size) {
     actualizarTracker_(ss, Array.from(diasTocados).sort(), equipo);
@@ -243,13 +247,18 @@ function leerEventos_(ss) {
   }));
 }
 
-/** Foto de inicio de jornada por 'día|agente' (la última tomada gana). */
+/** Foto de inicio de jornada por 'día|agente' → { total, casos } (la última tomada gana). */
 function leerFotos_(ss) {
   const hoja = ss.getSheetByName(CONFIG.HOJAS.fotos);
   const fotos = {};
   if (!hoja) return fotos;
   const tz = ss.getSpreadsheetTimeZone();
   const formatear = f => Utilities.formatDate(f, tz, 'yyyy-MM-dd');
-  leerFilas_(hoja).forEach(f => { fotos[diaDesdeCelda(f[0], formatear) + '|' + normalizarTexto(f[1])] = Number(f[3]) || 0; });
+  leerFilas_(hoja).forEach(f => {
+    fotos[diaDesdeCelda(f[0], formatear) + '|' + normalizarTexto(f[1])] = {
+      total: Number(f[3]) || 0,
+      casos: (String(f[5] || '').match(/\d+/g) || []),
+    };
+  });
   return fotos;
 }
