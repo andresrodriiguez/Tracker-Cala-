@@ -22,6 +22,47 @@ empatía, escribir claro y cerrar siempre con un siguiente paso.
 
 ---
 
+## Correo modelo (el estilo a seguir)
+
+Todas las respuestas deben sonar más o menos como esta: cálida, corta, en "nosotros", con los datos
+que necesitamos en lista y con un siguiente paso claro.
+
+> **Consulta del cliente:** "Quiero registrarme para ver los videos y el curso q no podré ver live"
+
+```
+Hola, Claudia:
+
+¡Gracias por escribirnos! Qué bueno que quieras ver el curso aunque no puedas estar en vivo. Con
+gusto te ayudamos a tener acceso a los videos.
+
+Para ubicar tu registro y activarte el acceso más rápido, ¿nos compartes por favor estos datos?
+
+1. El nombre del curso o programa que te interesa ver.
+2. El correo con el que hiciste la compra o el registro, si ya lo hiciste. Si todavía no te
+   registras, cuéntanos y te enviamos el enlace para hacerlo.
+
+En cuanto nos respondas, lo revisamos y te escribimos con los pasos para entrar a Cala Global y ver
+las grabaciones a tu ritmo.
+
+Cualquier otra duda, solo responde a este correo. Aquí estamos para ayudarte.
+
+Con cariño,
+Andrés Rodríguez
+El Equipo Cala
+```
+
+**Qué lo hace funcionar:**
+- **Saludo con nombre** y un "¡Gracias por escribirnos!" para abrir.
+- **Una frase cercana** que muestra que entendimos lo que quiere ("Qué bueno que quieras ver el curso
+  aunque no puedas estar en vivo").
+- **El porqué antes de pedir algo** ("Para ubicar tu registro… más rápido").
+- **Todo lo que necesitamos en una sola lista numerada**, con una salida si todavía no lo tiene.
+- **Qué pasa después** ("En cuanto nos respondas, lo revisamos y te escribimos…").
+- **Cierre abierto** ("Aquí estamos para ayudarte") y la firma de siempre.
+- Unas 120 palabras, párrafos de 1 a 3 líneas.
+
+---
+
 ## 2. Los 6 principios
 
 1. **Persona primero, caso después.** Saludamos por su nombre y reconocemos su situación antes de
