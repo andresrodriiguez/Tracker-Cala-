@@ -91,6 +91,11 @@ Según cómo lo hagan en Help Scout, ajusta `Config.gs`:
 | **Moviéndolos a otro buzón** | Pon en `MAILBOXES_EQUIPO` los IDs de los buzones del equipo SOP (están en la hoja `HS_Usuarios`). |
 | Poniéndoles una **etiqueta** | Pon las etiquetas en `TAGS_REASIGNACION` (ej. `['cch', 'coach']`). |
 
+## Guía para responder a los clientes
+
+El estilo y las plantillas para contestar los correos de Help Scout están en
+[`docs/guia-respuestas-clientes.md`](docs/guia-respuestas-clientes.md).
+
 ## Preguntas frecuentes
 
 - **¿Es instantáneo?** Se actualiza cada 15 minutos (`MINUTOS_ENTRE_SINCRONIZACIONES`, mínimo 1). "Help Scout → Sincronizar ahora" fuerza una actualización.
