@@ -166,7 +166,7 @@ function aplicar() {
 
   form.setProgressBar(true);
   form.setConfirmationMessage(MENSAJE_CONFIRMACION);
-  Logger.log('✅ Listo: %s secciones creadas. Abre el Form y revisa la vista previa (👁).', SECCIONES.length);
+  Logger.log('✅ Listo: ' + SECCIONES.length + ' secciones creadas. Abre el Form y revisa la vista previa (👁).');
 }
 
 // ---------------------------------------------------------------------------
