@@ -4,7 +4,7 @@ Organiza el Google Form de la encuesta en secciones y le pone el banner y los co
 
 ## 1. Dividir en secciones (script, ~3 min)
 
-1. Abre [script.google.com](https://script.google.com) con la cuenta que **edita** el Form y crea un **Nuevo proyecto**.
+1. Abre el Form en modo edición con una cuenta **editora** → **⋮ (arriba a la derecha) → Apps Script**.
 2. Borra lo que trae y pega todo [`OrganizarForm.gs`](OrganizarForm.gs). Guarda (💾).
 3. Elige la función **`revisar`** arriba y pulsa **Ejecutar**. La primera vez Google pide permisos: *Revisar permisos → tu cuenta → Avanzado → Ir a (no seguro) → Permitir*. Es tu propio script.
 4. En **Registro de ejecución** debe decir **✅ Todo listo**. Esta función no cambia nada.

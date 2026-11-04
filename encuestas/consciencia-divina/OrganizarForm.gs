@@ -2,8 +2,8 @@
  * Organiza el Google Form de la encuesta "Consciencia Divina" en secciones.
  *
  * Cómo usarlo (una sola vez, con la cuenta que edita el Form):
- *   1. Abre https://script.google.com → Nuevo proyecto.
- *   2. Pega este archivo completo y guarda.
+ *   1. Abre el Form en modo edición → ⋮ (arriba a la derecha) → Apps Script.
+ *   2. Borra lo que trae, pega este archivo completo y guarda.
  *   3. Ejecuta `revisar`: solo muestra en el registro qué va a cambiar (no toca nada).
  *   4. Si todo sale ✅, ejecuta `aplicar`. Antes de cambiar nada, guarda una copia
  *      de respaldo del Form en tu Drive.
@@ -18,7 +18,23 @@
  * porque Google no permite cambiarlos con Apps Script.
  */
 
+/**
+ * Si el script se crea desde el Form (⋮ → Apps Script), no hace falta el ID.
+ * Si se crea aparte en script.google.com, pon aquí el ID del enlace de EDICIÓN:
+ * https://docs.google.com/forms/d/ESTE_ES_EL_ID/edit
+ */
 const FORM_ID = '1j6LpbJw4qF6eI5oQXMYf1U8tYI7GSmf9qYrCSfYweyY';
+
+function abrirForm_() {
+  const activo = FormApp.getActiveForm();
+  if (activo) return activo;
+  try {
+    return FormApp.openById(FORM_ID);
+  } catch (e) {
+    throw new Error('No se pudo abrir el Form. Crea el script desde el propio Form (⋮ → Apps Script) ' +
+      'con una cuenta que sea editora, o revisa FORM_ID. Detalle: ' + e.message);
+  }
+}
 
 /** Cada sección empieza justo antes de la pregunta cuyo título contiene `antes`. */
 const SECCIONES = [
@@ -78,7 +94,7 @@ const MENSAJE_CONFIRMACION =
 
 /** Solo muestra lo que se va a cambiar. No modifica el Form. */
 function revisar() {
-  const form = FormApp.openById(FORM_ID);
+  const form = abrirForm_();
   const items = form.getItems();
   Logger.log('Form: "%s" — %s elementos', form.getTitle(), items.length);
   items.forEach(function (it, i) {
@@ -110,11 +126,11 @@ function revisar() {
 
 /** Aplica los cambios al Form (después de guardar una copia de respaldo). */
 function aplicar() {
-  const form = FormApp.openById(FORM_ID);
+  const form = abrirForm_();
   const problemas = verificar_(form);
   if (problemas.length) throw new Error('No se cambió nada:\n' + problemas.join('\n'));
 
-  const copia = DriveApp.getFileById(FORM_ID)
+  const copia = DriveApp.getFileById(form.getId())
     .makeCopy(form.getTitle() + ' (respaldo ' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm') + ')');
   Logger.log('Respaldo guardado: %s', copia.getUrl());
 
