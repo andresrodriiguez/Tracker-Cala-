@@ -172,7 +172,7 @@ function aplicar() {
 // ---------------------------------------------------------------------------
 
 function normalizar_(s) {
-  return String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+  return String(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
 function preguntas_(form) {
