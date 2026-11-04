@@ -1,0 +1,657 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Encuesta Consciencia Divina</title>
+<meta name="description" content="Cuéntanos cómo viviste Consciencia Divina.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #04261d;
+    --card: #ffffff;
+    --ink: #13231e;
+    --muted: #5c6f68;
+    --line: #dfe7e3;
+    --soft: #f3f8f6;
+    --accent: #0c8f63;
+    --accent-strong: #08714e;
+    --accent-soft: #e3f4ec;
+    --glow: #33e0a1;
+    --danger: #c2410c;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    font-family: "Montserrat", system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--ink);
+    background-color: var(--bg);
+    background-image:
+      linear-gradient(180deg, rgba(4, 38, 29, .15) 0%, rgba(4, 38, 29, .55) 100%),
+      url("https://images.leadconnectorhq.com/image/f_webp/q_80/r_1200/u_https://assets.cdn.filesafe.space/Br7hPRVSdBc9hG8i8X8A/media/67cf514104d6592dde383629.webp");
+    background-size: cover;
+    background-position: center top;
+    background-attachment: fixed;
+    min-height: 100vh;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ---------- Banner ---------- */
+  .banner {
+    text-align: center;
+    padding: 40px 16px 8px;
+    color: #fff;
+  }
+  .banner img {
+    width: min(340px, 78vw);
+    height: auto;
+    display: block;
+    margin: 0 auto;
+    filter: drop-shadow(0 0 18px rgba(51, 224, 161, .35));
+  }
+  .banner h1 {
+    margin: 18px 0 4px;
+    font-size: clamp(20px, 4.4vw, 28px);
+    font-weight: 700;
+    letter-spacing: .01em;
+  }
+  .banner p {
+    margin: 0 auto;
+    max-width: 560px;
+    font-size: 15px;
+    color: rgba(255, 255, 255, .85);
+  }
+
+  /* ---------- Card ---------- */
+  .wrap { max-width: 760px; margin: 0 auto; padding: 24px 16px 56px; }
+  .card {
+    background: var(--card);
+    border-radius: 18px;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, .35);
+    overflow: hidden;
+  }
+
+  /* ---------- Progress ---------- */
+  .progress { padding: 22px 28px 18px; border-bottom: 1px solid var(--line); }
+  .progress-top {
+    display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
+    font-size: 13px; color: var(--muted); font-weight: 600;
+  }
+  .progress-top strong { color: var(--accent-strong); text-transform: uppercase; letter-spacing: .06em; font-size: 12px; }
+  .bar { height: 6px; border-radius: 99px; background: var(--soft); margin-top: 10px; overflow: hidden; }
+  .bar > span {
+    display: block; height: 100%; width: 0;
+    background: linear-gradient(90deg, var(--accent), var(--glow));
+    border-radius: inherit; transition: width .35s ease;
+  }
+  .steps { display: flex; gap: 6px; margin-top: 12px; }
+  .steps i {
+    flex: 1; height: 4px; border-radius: 99px; background: var(--line);
+    transition: background .3s;
+  }
+  .steps i.done { background: var(--accent); }
+  .steps i.current { background: var(--glow); }
+
+  /* ---------- Sections ---------- */
+  .section { display: none; padding: 26px 28px 8px; }
+  .section.active { display: block; animation: fade .3s ease; }
+  @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  .section-head { margin-bottom: 8px; }
+  .section-head .kicker {
+    font-size: 12px; font-weight: 700; color: var(--accent); letter-spacing: .08em; text-transform: uppercase;
+  }
+  .section-head h2 { margin: 4px 0 6px; font-size: 22px; font-weight: 800; color: var(--ink); }
+  .section-head p { margin: 0; color: var(--muted); font-size: 14px; }
+
+  /* ---------- Questions ---------- */
+  .q {
+    padding: 20px 0;
+    border-top: 1px solid var(--line);
+    scroll-margin-top: 24px;
+  }
+  .section-head + .q { border-top: none; }
+  .q-title { font-weight: 600; font-size: 15.5px; margin: 0 0 12px; display: block; }
+  .q-title .req { color: var(--accent); margin-left: 2px; }
+  .q-title .opt { color: var(--muted); font-weight: 500; font-size: 13px; margin-left: 6px; }
+  .q-hint { font-size: 13px; color: var(--muted); margin: -6px 0 12px; }
+  .q.invalid .q-title { color: var(--danger); }
+  .q .err { display: none; color: var(--danger); font-size: 13px; font-weight: 600; margin-top: 8px; }
+  .q.invalid .err { display: block; }
+
+  .choices { display: grid; gap: 8px; }
+  .choice {
+    position: relative; display: flex; align-items: center; gap: 12px;
+    padding: 11px 14px; border: 1.5px solid var(--line); border-radius: 12px;
+    cursor: pointer; font-size: 14.5px; background: #fff;
+    transition: border-color .15s, background .15s, box-shadow .15s;
+  }
+  .choice:hover { border-color: #b7d8ca; background: var(--soft); }
+  .choice input { position: absolute; opacity: 0; pointer-events: none; }
+  .choice .dot {
+    flex: none; width: 18px; height: 18px; border-radius: 50%;
+    border: 2px solid #9db5ab; display: grid; place-items: center; transition: border-color .15s;
+  }
+  .choice .dot::after {
+    content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+    transform: scale(0); transition: transform .15s;
+  }
+  .choice:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+  .choice:has(input:checked) .dot { border-color: var(--accent); }
+  .choice:has(input:checked) .dot::after { transform: scale(1); }
+  .choice:has(input:focus-visible) { box-shadow: 0 0 0 3px rgba(12, 143, 99, .25); }
+  .other-text { margin-top: 8px; display: none; }
+  .other-text.show { display: block; }
+
+  /* scale 0-4 */
+  .scale { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+  .scale .choice { justify-content: center; padding: 12px 0; font-weight: 700; font-size: 16px; }
+  .scale .choice .dot { display: none; }
+  .scale-labels { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--muted); margin-top: 8px; font-weight: 500; }
+
+  input[type="text"], input[type="tel"], textarea {
+    width: 100%; font: inherit; font-size: 15px; color: var(--ink);
+    border: 1.5px solid var(--line); border-radius: 12px; padding: 12px 14px; background: #fff;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  textarea { min-height: 104px; resize: vertical; }
+  input[type="text"]:focus, input[type="tel"]:focus, textarea:focus {
+    outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(12, 143, 99, .18);
+  }
+  .people { display: grid; gap: 10px; }
+  .person { display: grid; grid-template-columns: 28px 1fr 1fr 1fr; gap: 8px; align-items: center; }
+  .person b {
+    width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center;
+    background: var(--accent-soft); color: var(--accent-strong); font-size: 13px;
+  }
+
+  /* ---------- Nav ---------- */
+  .nav {
+    display: flex; justify-content: space-between; gap: 12px;
+    padding: 18px 28px 26px; border-top: 1px solid var(--line); background: #fbfdfc;
+  }
+  .btn {
+    font: inherit; font-weight: 700; font-size: 15px; border-radius: 12px; padding: 13px 22px;
+    cursor: pointer; border: 1.5px solid transparent; transition: transform .1s, background .15s, opacity .15s;
+  }
+  .btn:active { transform: translateY(1px); }
+  .btn-ghost { background: #fff; border-color: var(--line); color: var(--ink); }
+  .btn-ghost:hover { background: var(--soft); }
+  .btn-primary {
+    margin-left: auto; color: #fff;
+    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+    box-shadow: 0 6px 18px rgba(8, 113, 78, .3);
+  }
+  .btn-primary:hover { opacity: .93; }
+  .btn[disabled] { opacity: .6; cursor: wait; }
+  .btn[hidden] { display: none; }
+
+  /* ---------- Thanks ---------- */
+  .thanks { display: none; text-align: center; padding: 56px 28px 60px; }
+  .thanks.show { display: block; animation: fade .4s ease; }
+  .thanks .icon {
+    width: 72px; height: 72px; margin: 0 auto 18px; border-radius: 50%;
+    display: grid; place-items: center; background: var(--accent-soft); color: var(--accent);
+  }
+  .thanks h2 { margin: 0 0 8px; font-size: 24px; font-weight: 800; }
+  .thanks p { margin: 0 auto; max-width: 460px; color: var(--muted); }
+
+  .notice {
+    margin: 0 28px; padding: 10px 14px; border-radius: 10px; font-size: 13px;
+    background: #fff7e6; color: #7a4a00; border: 1px solid #f5d9a8; display: none;
+  }
+  .notice.show { display: block; margin-top: 18px; }
+  .send-error { color: var(--danger); font-weight: 600; font-size: 14px; padding: 0 28px; display: none; }
+  .send-error.show { display: block; margin-top: 14px; }
+
+  footer { text-align: center; color: rgba(255, 255, 255, .7); font-size: 12.5px; margin-top: 18px; }
+
+  @media (max-width: 560px) {
+    .banner { padding-top: 28px; }
+    .progress, .section, .nav { padding-left: 18px; padding-right: 18px; }
+    .notice, .send-error { margin-left: 18px; margin-right: 18px; padding-left: 14px; }
+    .section-head h2 { font-size: 20px; }
+    .scale { gap: 6px; }
+    .person { grid-template-columns: 28px 1fr; }
+    .person input:nth-of-type(n+2) { grid-column: 2; }
+    .btn { padding: 13px 18px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<header class="banner">
+  <img src="https://images.leadconnectorhq.com/image/f_webp/q_80/r_900/u_https://assets.cdn.filesafe.space/Br7hPRVSdBc9hG8i8X8A/media/67cf5142c6d47c6fe6d6c598.webp"
+       alt="Consciencia Divina" width="426" height="277">
+  <h1>Encuesta de satisfacción</h1>
+  <p>Gracias por vivir Consciencia Divina con nosotros. Tu opinión nos ayuda a crear experiencias cada vez más transformadoras. Te tomará unos 5 minutos.</p>
+</header>
+
+<main class="wrap">
+  <div class="card">
+    <div class="progress" id="progress">
+      <div class="progress-top">
+        <strong id="progress-name"></strong>
+        <span id="progress-count"></span>
+      </div>
+      <div class="bar"><span id="bar"></span></div>
+      <div class="steps" id="steps"></div>
+    </div>
+
+    <div class="notice" id="notice">
+      Modo de prueba: la encuesta todavía no está conectada al Google Form, así que las respuestas no se guardan.
+    </div>
+
+    <form id="survey" novalidate></form>
+
+    <p class="send-error" id="send-error" role="alert"></p>
+
+    <div class="nav" id="nav">
+      <button type="button" class="btn btn-ghost" id="prev">Anterior</button>
+      <button type="button" class="btn btn-primary" id="next">Siguiente</button>
+    </div>
+
+    <div class="thanks" id="thanks" role="status">
+      <div class="icon">
+        <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+      </div>
+      <h2>¡Gracias por compartir tu experiencia!</h2>
+      <p>Recibimos tus respuestas. Cada comentario nos ayuda a seguir creciendo en consciencia y bienestar.</p>
+    </div>
+  </div>
+  <footer>© Cala Enterprises · Consciencia Divina</footer>
+</main>
+
+<script>
+/* =====================================================================
+   CONFIGURACIÓN — conexión con el Google Form original
+   ---------------------------------------------------------------------
+   Opción A (la más fácil): pega en PREFILLED_URL el "vínculo previamente
+   completado" del Form (⋮ → Obtener vínculo previamente completado),
+   llenando TODAS las preguntas. Los entry.XXXX se asignan en orden.
+   Opción B: escribe el entry de cada pregunta en el campo `entry`.
+   ===================================================================== */
+const CONFIG = {
+  PREFILLED_URL: '',
+  // Se deduce de PREFILLED_URL; o escríbelo: https://docs.google.com/forms/d/e/XXXX/formResponse
+  FORM_ACTION: '',
+  // Secciones del Form original (7 después de correr OrganizarForm.gs). Si no tiene secciones: '0'
+  PAGE_HISTORY: '0,1,2,3,4,5,6',
+};
+
+const EXC5 = ['Excelente', 'Muy bueno', 'Bueno', 'Regular', 'Deficiente'];
+const EXC5_CAP = ['Excelente', 'Muy Bueno', 'Bueno', 'Regular', 'Deficiente'];
+const EXC5_FEM = ['Excelente', 'Muy buena', 'Buena', 'Regular', 'Deficiente'];
+
+/* Cada opción puede ser texto o { label, value }:
+   `label` es lo que ve la persona y `value` lo que se envía al Form
+   (debe coincidir EXACTAMENTE con la opción del Google Form). */
+const SECTIONS = [
+  {
+    title: 'Tu experiencia en general',
+    intro: 'Empecemos por cómo te sentiste con Consciencia Divina.',
+    questions: [
+      { id: 'satisfaccion', type: 'radio', required: true,
+        title: 'De manera general, ¿cuán satisfecho te sientes con esta experiencia?',
+        // Si el Form todavía dice "Option 2" (no se ha corrido OrganizarForm.gs), usa { label: 'Algo satisfecho', value: 'Option 2' }.
+        options: ['Muy satisfecho', 'Algo satisfecho', 'Algo insatisfecho', 'Muy insatisfecho'] },
+      { id: 'expectativas', type: 'radio', required: true,
+        title: '¿Cumplió esta experiencia con tus expectativas?',
+        options: [{ label: 'Sí, excelente', value: 'Si, excelente' }, 'Muy por encima', 'En línea con mis expectativas', 'Por debajo', 'Muy por debajo'] },
+      { id: 'recomendar', type: 'scale', required: true,
+        title: '¿Qué tan probable es que recomiendes esta experiencia a un amigo, familiar o colega?',
+        min: 0, max: 4, minLabel: 'Poco probable', maxLabel: 'Muy probable' },
+      { id: 'recompra', type: 'radio', required: true,
+        title: '¿Cuán probable es que desees adquirir otra experiencia de Cala Enterprises?',
+        options: ['Extremadamente probable', 'Muy probable', 'Algo probable', 'No tan probable', 'Para nada probable'] },
+      { id: 'canal', type: 'radio', required: true, other: true,
+        title: '¿Cómo te enteraste de esta experiencia?',
+        options: ['Nuestro servicio al cliente', 'Algún Referido', 'Email', 'Página Web', 'Redes Sociales (Instagram, facebook, Youtube)'] },
+      { id: 'calidad_inversion', type: 'radio', required: true,
+        title: 'Considerando la inversión realizada, ¿cómo calificas la calidad de esta experiencia?',
+        options: ['Excelente', 'Muy buena', 'Buena', 'Regular', 'Deficiente'] },
+    ],
+  },
+  {
+    title: 'Antes del evento',
+    intro: 'Tu inscripción y la información que recibiste.',
+    questions: [
+      { id: 'info_previa', type: 'radio', required: true,
+        title: 'Previo al evento, ¿cuánta de la información que necesitaste recibiste de nosotros?',
+        options: ['Toda', 'La mayoría', 'Algo de información', 'Muy poco', 'Nada'] },
+      { id: 'servicio_cliente', type: 'radio', required: true,
+        title: '¿Cómo calificas el soporte que recibiste de nuestro Servicio al Cliente?',
+        // Si el Form todavía dice "Defciente", usa { label: 'Deficiente', value: 'Defciente' }.
+        options: ['Excelente', 'Muy bueno', 'Bueno', 'Regular', 'Deficiente'] },
+      { id: 'asesor', type: 'textarea', required: true,
+        title: '¿Cuál es el nombre de tu asesor para inscribirte en el Taller Consciencia Divina y cómo calificarías la atención que te brindó?',
+        placeholder: 'Ej.: María — excelente, muy atenta en todo el proceso' },
+    ],
+  },
+  {
+    title: 'Organización y Cala Team',
+    intro: 'La logística, los materiales y el acompañamiento durante el encuentro.',
+    questions: [
+      { id: 'organizacion', type: 'radio', required: true,
+        title: '¿Cómo calificas la organización de este evento?', options: EXC5_FEM },
+      { id: 'transporte', type: 'radio', required: true, other: true,
+        title: '¿Cuán organizada fue la logística de transporte y traslado al Cala Center?',
+        hint: 'Elige la respuesta que aplique para ti.',
+        options: [...EXC5, 'Me trasladé al Cala Center por mi cuenta'] },
+      { id: 'cuaderno', type: 'radio', required: true,
+        title: '¿Cuán útil te pareció el cuaderno de trabajo que te entregamos y su contenido?',
+        options: ['Extremadamente útil', 'Muy útil', 'Promedio', 'No tan útil', 'Nada útil'] },
+      { id: 'apoyo_team', type: 'radio', required: true,
+        title: '¿Qué tan útil consideras que fue el apoyo brindado por el Cala Team durante el encuentro?', options: EXC5 },
+      { id: 'amabilidad_team', type: 'radio', required: true,
+        title: '¿Qué tan amigable fue el Cala Team que asistió al encuentro?',
+        options: ['Extremadamente amigable', 'Muy amigable', 'Promedio', 'Poco amigable', 'Nada amigable'] },
+      { id: 'recepcion', type: 'radio', required: true,
+        title: '¿Cómo evalúas nuestro proceso de recepción en el Cala Center durante los días del evento?', options: EXC5 },
+      { id: 'afinidad', type: 'radio', required: true,
+        title: '¿Cómo evalúas la afinidad con el grupo de participantes?', options: EXC5 },
+    ],
+  },
+  {
+    title: 'Sesiones y facilitadores',
+    intro: 'Cuéntanos cómo viviste cada una de las sesiones.',
+    questions: [
+      { id: 'meditaciones', type: 'radio', required: true,
+        title: '¿Cómo fue tu experiencia con las meditaciones guiadas por Ismael?', options: EXC5 },
+      { id: 'sesiones_ismael', type: 'radio', required: true,
+        title: 'En general, ¿cómo evalúas las sesiones con Ismael?', options: EXC5_CAP },
+      { id: 'sesiones_julian', type: 'radio', required: false,
+        title: 'En general, ¿cómo evalúas las sesiones con Julian Merchan?', options: EXC5_CAP },
+      { id: 'sesiones_alberto', type: 'radio', required: true,
+        title: 'En general, ¿cómo evalúas las sesiones con Alberto Becerra?', options: EXC5_CAP },
+      { id: 'sesiones_betsy', type: 'radio', required: true,
+        title: 'En general, ¿cómo evalúas las sesiones con Betsy Dopico?', options: EXC5 },
+      { id: 'sesion_mercedes', type: 'radio', required: true, other: true,
+        title: '¿Cómo evalúas la sesión de Mercedes Guzman?', options: EXC5 },
+    ],
+  },
+  {
+    title: 'Programa y tiempos',
+    intro: 'El itinerario, la duración de las sesiones y el cierre.',
+    questions: [
+      { id: 'cronograma', type: 'radio', required: true, other: true,
+        title: '¿Cómo calificas el cumplimiento del cronograma / itinerario?', options: EXC5_CAP },
+      { id: 'duracion_sesiones', type: 'radio', required: true, other: true,
+        title: '¿Cómo calificarías la duración de las sesiones del evento?',
+        options: ['Excelente', 'Muy Buena', 'Buena', 'Regular', 'Deficiente'] },
+      { id: 'recesos', type: 'radio', required: true, other: true,
+        title: '¿Cómo consideras la duración de los recesos entre las sesiones?', options: EXC5_CAP },
+      { id: 'cierre', type: 'radio', required: true,
+        title: '¿Cómo evalúas el cierre del evento?', options: EXC5_CAP },
+    ],
+  },
+  {
+    title: 'Cala Center y alimentación',
+    intro: 'Las instalaciones y la comida durante tu estadía.',
+    questions: [
+      { id: 'instalaciones', type: 'radio', required: true,
+        title: '¿Cómo evalúas tu experiencia en las instalaciones del Cala Center?', options: EXC5_CAP },
+      { id: 'comida', type: 'radio', required: true,
+        title: '¿Cómo fue el servicio de la comida?', options: EXC5_CAP },
+      { id: 'porciones', type: 'radio', required: true, other: true,
+        title: '¿Qué te pareció el tamaño de las porciones?', options: EXC5_CAP },
+    ],
+  },
+  {
+    title: 'Tus comentarios',
+    intro: 'Para terminar, queremos escucharte con tus propias palabras.',
+    questions: [
+      { id: 'menos_gusto', type: 'textarea', required: true,
+        title: '¿Qué fue lo que menos te gustó de esta experiencia?' },
+      { id: 'aprendizaje', type: 'textarea', required: true,
+        title: '¿Cuál fue tu mayor aprendizaje en esta experiencia?' },
+      { id: 'mejorar', type: 'textarea', required: true,
+        title: '¿Hubo algún aspecto del evento que consideres que se podría mejorar?' },
+      { id: 'referidos', type: 'people', required: false, count: 3,
+        title: '¿Puedes recomendar a 3 personas que te gustaría que participen en el Retiro en Mindfulness y Bienestar?',
+        hint: 'Coloca nombre, apellido y teléfono.' },
+    ],
+  },
+];
+
+/* ---------- Conexión con el Form ---------- */
+const ALL_QUESTIONS = SECTIONS.flatMap(s => s.questions);
+(function applyPrefilled() {
+  if (!CONFIG.PREFILLED_URL) return;
+  let url;
+  try { url = new URL(CONFIG.PREFILLED_URL); } catch (e) { console.error('PREFILLED_URL no es un enlace válido'); return; }
+  if (!CONFIG.FORM_ACTION) CONFIG.FORM_ACTION = url.origin + url.pathname.replace(/\/viewform$/, '/formResponse');
+  const ids = [];
+  for (const key of url.searchParams.keys()) {
+    const m = key.match(/^entry\.(\d+)$/);
+    if (m && !ids.includes(m[1])) ids.push(m[1]);
+  }
+  const pending = ALL_QUESTIONS.filter(q => !q.entry);
+  if (ids.length !== pending.length) {
+    console.warn(`El vínculo previamente completado tiene ${ids.length} preguntas y la encuesta ${pending.length}. Llena todas las preguntas al generar el vínculo.`);
+  }
+  pending.forEach((q, i) => { if (ids[i]) q.entry = ids[i]; });
+})();
+const CONNECTED = Boolean(CONFIG.FORM_ACTION) && ALL_QUESTIONS.every(q => q.entry);
+
+/* ---------- Render ---------- */
+const form = document.getElementById('survey');
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const optLabel = o => typeof o === 'string' ? o : o.label;
+const optValue = o => typeof o === 'string' ? o : o.value;
+
+function renderQuestion(q) {
+  const title = `<span class="q-title" id="t-${q.id}">${esc(q.title)}${q.required ? '<span class="req" aria-hidden="true">*</span>' : '<span class="opt">(opcional)</span>'}</span>`
+    + (q.hint ? `<p class="q-hint">${esc(q.hint)}</p>` : '');
+  let body = '';
+  if (q.type === 'radio') {
+    const opts = q.options.map(o => `
+      <label class="choice"><input type="radio" name="${q.id}" value="${esc(optValue(o))}"><span class="dot"></span>${esc(optLabel(o))}</label>`).join('');
+    const other = q.other ? `
+      <label class="choice"><input type="radio" name="${q.id}" value="__other_option__"><span class="dot"></span>Otro</label>` : '';
+    body = `<div class="choices" role="radiogroup" aria-labelledby="t-${q.id}">${opts}${other}</div>`
+      + (q.other ? `<div class="other-text"><input type="text" name="${q.id}__other" placeholder="Escribe tu respuesta" aria-label="Otro: escribe tu respuesta"></div>` : '');
+  } else if (q.type === 'scale') {
+    let opts = '';
+    for (let n = q.min; n <= q.max; n++) {
+      opts += `<label class="choice"><input type="radio" name="${q.id}" value="${n}" aria-label="${n}"><span class="dot"></span>${n}</label>`;
+    }
+    body = `<div class="scale" role="radiogroup" aria-labelledby="t-${q.id}">${opts}</div>
+      <div class="scale-labels"><span>${q.min} · ${esc(q.minLabel)}</span><span>${q.max} · ${esc(q.maxLabel)}</span></div>`;
+  } else if (q.type === 'textarea') {
+    body = `<textarea name="${q.id}" aria-labelledby="t-${q.id}" placeholder="${esc(q.placeholder || 'Escribe tu respuesta')}"></textarea>`;
+  } else if (q.type === 'people') {
+    let rows = '';
+    for (let i = 1; i <= q.count; i++) {
+      rows += `<div class="person"><b>${i}</b>
+        <input type="text" name="${q.id}_${i}_nombre" placeholder="Nombre" aria-label="Persona ${i}: nombre" autocomplete="off">
+        <input type="text" name="${q.id}_${i}_apellido" placeholder="Apellido" aria-label="Persona ${i}: apellido" autocomplete="off">
+        <input type="tel" name="${q.id}_${i}_tel" placeholder="Teléfono" aria-label="Persona ${i}: teléfono" autocomplete="off"></div>`;
+    }
+    body = `<div class="people">${rows}</div>`;
+  }
+  return `<div class="q" data-q="${q.id}">${title}${body}<div class="err">Esta pregunta es obligatoria.</div></div>`;
+}
+
+form.innerHTML = SECTIONS.map((s, i) => `
+  <section class="section" data-step="${i}" aria-labelledby="h-${i}">
+    <div class="section-head">
+      <div class="kicker">Sección ${i + 1} de ${SECTIONS.length}</div>
+      <h2 id="h-${i}">${esc(s.title)}</h2>
+      <p>${esc(s.intro)}</p>
+    </div>
+    ${s.questions.map(renderQuestion).join('')}
+  </section>`).join('');
+
+document.getElementById('steps').innerHTML = SECTIONS.map(() => '<i></i>').join('');
+if (!CONNECTED) document.getElementById('notice').classList.add('show');
+
+/* ---------- Valores ---------- */
+function getAnswer(q) {
+  if (q.type === 'radio' || q.type === 'scale') {
+    const checked = form.querySelector(`input[name="${q.id}"]:checked`);
+    if (!checked) return null;
+    if (checked.value === '__other_option__') {
+      const txt = form.querySelector(`input[name="${q.id}__other"]`).value.trim();
+      return txt ? { other: txt } : null;
+    }
+    return checked.value;
+  }
+  if (q.type === 'textarea') return form.querySelector(`textarea[name="${q.id}"]`).value.trim() || null;
+  if (q.type === 'people') {
+    const lines = [];
+    for (let i = 1; i <= q.count; i++) {
+      const v = k => form.querySelector(`input[name="${q.id}_${i}_${k}"]`).value.trim();
+      const parts = [[v('nombre'), v('apellido')].filter(Boolean).join(' '), v('tel')].filter(Boolean);
+      if (parts.length) lines.push(`${i}. ${parts.join(' — ')}`);
+    }
+    return lines.length ? lines.join('\n') : null;
+  }
+  return null;
+}
+
+/* ---------- Borrador local (solo en este navegador) ---------- */
+const DRAFT_KEY = 'encuesta-consciencia-divina-borrador';
+function saveDraft() {
+  try {
+    const data = {};
+    form.querySelectorAll('input, textarea').forEach(el => {
+      if (el.type === 'radio') { if (el.checked) data[el.name] = el.value; }
+      else if (el.value) data[el.name] = el.value;
+    });
+    localStorage.setItem(DRAFT_KEY, JSON.stringify({ step, data }));
+  } catch (e) { /* sin almacenamiento: no pasa nada */ }
+}
+function loadDraft() {
+  try {
+    const raw = localStorage.getItem(DRAFT_KEY);
+    if (!raw) return 0;
+    const { step: s, data } = JSON.parse(raw);
+    Object.entries(data || {}).forEach(([name, value]) => {
+      form.querySelectorAll(`[name="${CSS.escape(name)}"]`).forEach(el => {
+        if (el.type === 'radio') el.checked = el.value === value; else el.value = value;
+      });
+    });
+    return Math.min(Math.max(+s || 0, 0), SECTIONS.length - 1);
+  } catch (e) { return 0; }
+}
+function clearDraft() { try { localStorage.removeItem(DRAFT_KEY); } catch (e) {} }
+
+/* ---------- Navegación ---------- */
+const sectionsEls = [...form.querySelectorAll('.section')];
+const prevBtn = document.getElementById('prev');
+const nextBtn = document.getElementById('next');
+let step = 0;
+
+function syncOther() {
+  form.querySelectorAll('.other-text').forEach(box => {
+    const name = box.querySelector('input').name.replace('__other', '');
+    const on = form.querySelector(`input[name="${name}"][value="__other_option__"]`).checked;
+    box.classList.toggle('show', on);
+  });
+}
+
+function show(i, scroll) {
+  step = i;
+  sectionsEls.forEach((el, k) => el.classList.toggle('active', k === i));
+  prevBtn.hidden = i === 0;
+  nextBtn.textContent = i === SECTIONS.length - 1 ? 'Enviar encuesta' : 'Siguiente';
+  document.getElementById('progress-name').textContent = SECTIONS[i].title;
+  document.getElementById('progress-count').textContent = `Sección ${i + 1} de ${SECTIONS.length}`;
+  document.getElementById('bar').style.width = `${((i + 1) / SECTIONS.length) * 100}%`;
+  document.querySelectorAll('#steps i').forEach((el, k) => {
+    el.className = k < i ? 'done' : k === i ? 'current' : '';
+  });
+  if (scroll) document.querySelector('.card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  saveDraft();
+}
+
+function validate(i) {
+  let first = null;
+  SECTIONS[i].questions.forEach(q => {
+    const el = form.querySelector(`[data-q="${q.id}"]`);
+    const bad = q.required && getAnswer(q) === null;
+    el.classList.toggle('invalid', bad);
+    if (bad && !first) first = el;
+  });
+  if (first) first.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  return !first;
+}
+
+form.addEventListener('change', e => {
+  syncOther();
+  const q = e.target.closest('.q');
+  if (q && q.classList.contains('invalid')) {
+    const def = ALL_QUESTIONS.find(x => x.id === q.dataset.q);
+    if (getAnswer(def) !== null) q.classList.remove('invalid');
+  }
+  saveDraft();
+});
+form.addEventListener('input', e => {
+  const q = e.target.closest('.q');
+  if (q && q.classList.contains('invalid')) {
+    const def = ALL_QUESTIONS.find(x => x.id === q.dataset.q);
+    if (getAnswer(def) !== null) q.classList.remove('invalid');
+  }
+  saveDraft();
+});
+
+prevBtn.addEventListener('click', () => show(Math.max(step - 1, 0), true));
+nextBtn.addEventListener('click', async () => {
+  if (!validate(step)) return;
+  if (step < SECTIONS.length - 1) return show(step + 1, true);
+  await submit();
+});
+
+/* ---------- Envío al Google Form ---------- */
+async function submit() {
+  const errBox = document.getElementById('send-error');
+  errBox.classList.remove('show');
+  nextBtn.disabled = true;
+  nextBtn.textContent = 'Enviando…';
+  try {
+    if (CONNECTED) {
+      const body = new URLSearchParams();
+      ALL_QUESTIONS.forEach(q => {
+        const a = getAnswer(q);
+        if (a === null) return;
+        if (typeof a === 'object') {
+          body.append(`entry.${q.entry}`, '__other_option__');
+          body.append(`entry.${q.entry}.other_option_response`, a.other);
+        } else {
+          body.append(`entry.${q.entry}`, a);
+        }
+      });
+      body.append('pageHistory', CONFIG.PAGE_HISTORY);
+      // Google Forms no permite leer la respuesta desde otro dominio (no-cors):
+      // si la red responde, el envío se considera hecho.
+      await fetch(CONFIG.FORM_ACTION, { method: 'POST', mode: 'no-cors', body });
+    } else {
+      console.info('Modo de prueba. Respuestas:', Object.fromEntries(ALL_QUESTIONS.map(q => [q.id, getAnswer(q)])));
+    }
+    clearDraft();
+    form.hidden = true;
+    document.getElementById('nav').hidden = true;
+    document.getElementById('progress').hidden = true;
+    document.getElementById('notice').classList.remove('show');
+    document.getElementById('thanks').classList.add('show');
+    document.querySelector('.card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } catch (e) {
+    errBox.textContent = 'No pudimos enviar tus respuestas. Revisa tu conexión a internet e inténtalo de nuevo.';
+    errBox.classList.add('show');
+    nextBtn.disabled = false;
+    nextBtn.textContent = 'Enviar encuesta';
+  }
+}
+
+show(loadDraft(), false);
+syncOther();
+</script>
+</body>
+</html>
