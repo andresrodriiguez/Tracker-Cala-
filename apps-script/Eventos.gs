@@ -9,6 +9,8 @@
  *   REASIGNADO        el caso salió del agente hacia otro usuario/equipo/buzón (CCH, COACH, ...)
  *   CERRADO           el caso pasó a "closed" estando a cargo del agente; minutos = tiempo de resolución
  *   PRIMERA_RESPUESTA primera respuesta del agente tras la asignación; minutos = tiempo de 1ª respuesta
+ *   RESPUESTA         (solo con ctx.incluirRespuestas) cada respuesta de un agente del equipo; minutos = tiempo
+ *                     desde el primer mensaje del cliente que estaba sin contestar (null si no había ninguno)
  *
  * @param {Object} conv  Conversación de la API v2 de Help Scout con _embedded.threads.
  * @param {Object} ctx
@@ -20,6 +22,7 @@
  *   minutos(fin, inicio) → (opcional) minutos entre dos Date; por defecto minutos corridos
  *   fechaInicio      → (opcional) 'yyyy-MM-dd'; cerrar un caso que entró a la carga antes de esta
  *                      fecha cuenta como asignado + cerrado ese día
+ *   incluirRespuestas → (opcional) true para emitir también los eventos RESPUESTA
  * @return {Object[]} eventos
  */
 /**
@@ -76,6 +79,7 @@ function derivarEventos(conv, ctx) {
   let inicioCiclo = null;         // desde cuándo se mide la resolución (asignación o reapertura)
   let primeraRespuestaPendiente = false;
   let hayReasignacion = false;
+  let clienteDesde = null;        // primer mensaje del cliente que sigue sin respuesta
 
   const aplicarAsignacion = (nuevoId, fecha, claveHilo) => {
     if (nuevoId === asignado) return;
@@ -124,6 +128,7 @@ function derivarEventos(conv, ctx) {
         diaEntrada = dia;
       }
       esperandoAgente = true;
+      if (!clienteDesde) clienteDesde = fecha;
     }
 
     // 2) Cambios de asignación.
@@ -142,6 +147,10 @@ function derivarEventos(conv, ctx) {
     if (esRespuestaAgente) {
       esperandoAgente = false;
       const agente = ctx.agentePorId(Number(autor.id));
+      if (ctx.incluirRespuestas && agente) {
+        emitir('RESPUESTA', 'Q-' + h.id, agente, fecha, clienteDesde ? minutosEntre(fecha, clienteDesde) : null);
+      }
+      clienteDesde = null;
       if (agente && primeraRespuestaPendiente && asignado === agente.id) {
         emitir('PRIMERA_RESPUESTA', 'P-' + h.id, agente, fecha, minutosEntre(fecha, inicioAsignacion));
         primeraRespuestaPendiente = false;
@@ -167,6 +176,8 @@ function derivarEventos(conv, ctx) {
           minutosEntre(fecha, inicioCiclo || new Date(conv.createdAt)));
       }
     }
+    // Al cerrarse el caso, el cliente deja de estar esperando.
+    if (nuevoEstado === 'closed' && estadoPrevio !== 'closed' && !esCliente) clienteDesde = null;
     estado = nuevoEstado;
   });
 

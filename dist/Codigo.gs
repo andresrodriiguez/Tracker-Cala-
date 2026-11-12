@@ -86,7 +86,7 @@ const CONFIG = {
     SEGUNDOS_ACTUALIZACION: 5,
     SEGUNDOS_FUERA_DE_HORARIO: 60,
     // Cada cuántos minutos se vuelve a leer todo desde cero (por si algo se escapó).
-    MINUTOS_RECARGA_COMPLETA: 10,
+    MINUTOS_RECARGA_COMPLETA: 5,
     // Meta para responder al cliente: el reloj de cada ticket pasa a amarillo a la mitad y a rojo al llegar.
     META_RESPUESTA_MIN: 60,
     // Estado de cada agente: amarillo / rojo si tiene clientes esperando y no responde hace estos minutos.
@@ -242,6 +242,8 @@ function inicioVentanaJornada(dia, horario) {
  *   REASIGNADO        el caso salió del agente hacia otro usuario/equipo/buzón (CCH, COACH, ...)
  *   CERRADO           el caso pasó a "closed" estando a cargo del agente; minutos = tiempo de resolución
  *   PRIMERA_RESPUESTA primera respuesta del agente tras la asignación; minutos = tiempo de 1ª respuesta
+ *   RESPUESTA         (solo con ctx.incluirRespuestas) cada respuesta de un agente del equipo; minutos = tiempo
+ *                     desde el primer mensaje del cliente que estaba sin contestar (null si no había ninguno)
  *
  * @param {Object} conv  Conversación de la API v2 de Help Scout con _embedded.threads.
  * @param {Object} ctx
@@ -253,6 +255,7 @@ function inicioVentanaJornada(dia, horario) {
  *   minutos(fin, inicio) → (opcional) minutos entre dos Date; por defecto minutos corridos
  *   fechaInicio      → (opcional) 'yyyy-MM-dd'; cerrar un caso que entró a la carga antes de esta
  *                      fecha cuenta como asignado + cerrado ese día
+ *   incluirRespuestas → (opcional) true para emitir también los eventos RESPUESTA
  * @return {Object[]} eventos
  */
 /**
@@ -309,6 +312,7 @@ function derivarEventos(conv, ctx) {
   let inicioCiclo = null;         // desde cuándo se mide la resolución (asignación o reapertura)
   let primeraRespuestaPendiente = false;
   let hayReasignacion = false;
+  let clienteDesde = null;        // primer mensaje del cliente que sigue sin respuesta
 
   const aplicarAsignacion = (nuevoId, fecha, claveHilo) => {
     if (nuevoId === asignado) return;
@@ -357,6 +361,7 @@ function derivarEventos(conv, ctx) {
         diaEntrada = dia;
       }
       esperandoAgente = true;
+      if (!clienteDesde) clienteDesde = fecha;
     }
 
     // 2) Cambios de asignación.
@@ -375,6 +380,10 @@ function derivarEventos(conv, ctx) {
     if (esRespuestaAgente) {
       esperandoAgente = false;
       const agente = ctx.agentePorId(Number(autor.id));
+      if (ctx.incluirRespuestas && agente) {
+        emitir('RESPUESTA', 'Q-' + h.id, agente, fecha, clienteDesde ? minutosEntre(fecha, clienteDesde) : null);
+      }
+      clienteDesde = null;
       if (agente && primeraRespuestaPendiente && asignado === agente.id) {
         emitir('PRIMERA_RESPUESTA', 'P-' + h.id, agente, fecha, minutosEntre(fecha, inicioAsignacion));
         primeraRespuestaPendiente = false;
@@ -400,6 +409,8 @@ function derivarEventos(conv, ctx) {
           minutosEntre(fecha, inicioCiclo || new Date(conv.createdAt)));
       }
     }
+    // Al cerrarse el caso, el cliente deja de estar esperando.
+    if (nuevoEstado === 'closed' && estadoPrevio !== 'closed' && !esCliente) clienteDesde = null;
     estado = nuevoEstado;
   });
 
@@ -490,93 +501,89 @@ function estadisticasTiempo(minutos, metaHoras) {
  *
  * Cada conversación de Help Scout se resume en un objeto pequeño ("compacto") con lo que el panel
  * necesita: si el cliente está esperando y desde cuándo, a quién está asignada y lo que pasó en el
- * día de jornada actual (respuestas de cada agente con su tiempo de respuesta, asignaciones,
- * cierres, re-asignaciones...). El panel se arma juntando todos los compactos.
+ * día de jornada actual. Todo sale del HISTORIAL de mensajes (hilos) de la conversación, la misma
+ * fuente que usa el tracker; no se usan campos de resumen de Help Scout sin documentar.
  */
 
 const TIPOS_MENSAJE_ = ['message', 'chat', 'phone'];
 
-/** true si el cliente está esperando respuesta (su mensaje es el último). */
-function clienteEsperando(conv) {
-  if (conv.status === 'closed' || conv.status === 'spam') return false;
-  const espera = conv.customerWaitingSince || {};
-  const ultimo = espera.latestReplyFrom || conv.latestReplyFrom;
-  if (ultimo) return ultimo === 'customer';
-  return conv.status === 'active';
+function hilosPublicados_(conv) {
+  return ((conv._embedded && conv._embedded.threads) || [])
+    .filter(h => !h.state || h.state === 'published')
+    .slice()
+    .sort((a, b) => (new Date(a.createdAt) - new Date(b.createdAt)) || (a.id - b.id));
 }
 
 /**
- * Conversación de la API v2 de Help Scout → compacto.
- * Si la conversación trae sus hilos (_embedded.threads) se calcula también la actividad del día.
- * @param {Object} o  { agentePorId, dia(Date)→'yyyy-MM-dd', hoy, minutos(fin, inicio), ctxEventos }
+ * ¿El cliente está esperando respuesta? Lo está si el caso sigue abierto (active o pending) y su
+ * mensaje es el último: ninguna persona del equipo de Help Scout le ha contestado después.
+ * Las notas internas y los cambios de estado o de asignación no cuentan como respuesta.
+ * @return {{esperando: boolean, desde: string|null, mensajes: number}}
+ *   desde = fecha ISO del PRIMER mensaje del cliente que sigue sin contestar
+ */
+function esperaDeConversacion(conv) {
+  const abierta = (conv.status === 'active' || conv.status === 'pending') && (!conv.state || conv.state === 'published');
+  let desde = null;
+  let estado = null;
+  let mensajes = 0;
+  hilosPublicados_(conv).forEach(h => {
+    const autor = h.createdBy || {};
+    const esCliente = h.type === 'customer' || autor.type === 'customer';
+    const previo = estado;
+    if (h.status && h.status !== 'nochange') estado = h.status;
+    if (esCliente) {
+      mensajes++;
+      if (!desde) desde = new Date(h.createdAt);
+      return;
+    }
+    if (autor.type === 'user' && TIPOS_MENSAJE_.indexOf(h.type) >= 0) desde = null; // le respondieron
+    if (estado === 'closed' && previo !== 'closed') desde = null;                   // se cerró el caso
+  });
+  return { esperando: abierta && !!desde, desde: abierta && desde ? desde.toISOString() : null, mensajes: mensajes };
+}
+
+/**
+ * Conversación de la API v2 de Help Scout (con _embedded.threads) → compacto.
+ * @param {Object} o  { dia(Date)→'yyyy-MM-dd', hoy, ctxEventos (con incluirRespuestas: true) }
  */
 function resumirConversacion(conv, o) {
-  const espera = conv.customerWaitingSince || {};
   const cliente = conv.primaryCustomer || {};
-  const nombreCliente = [cliente.first, cliente.last].filter(Boolean).join(' ') ||
-    [cliente.firstName, cliente.lastName].filter(Boolean).join(' ') || cliente.email || '';
+  const nombreCliente = [cliente.first, cliente.last].filter(Boolean).join(' ') || cliente.email || '';
   const asignado = conv.assignee && Number(conv.assignee.id) > 0 ? Number(conv.assignee.id) : null;
-  const esperando = clienteEsperando(conv);
+  const espera = esperaDeConversacion(conv);
+  const borrada = !!conv.state && conv.state !== 'published';
   const c = {
     id: conv.id,
     n: conv.number,
     s: String(conv.subject || '(sin asunto)').slice(0, 140),
     c: String(nombreCliente).slice(0, 60),
-    st: conv.status,
+    st: borrada ? 'deleted' : conv.status,
     a: asignado,
     mb: conv.mailboxId || null,
-    w: esperando ? (espera.time || conv.userUpdatedAt || conv.createdAt || null) : null,
-    h: false, // trae la actividad del día (hilos)
-    ev: [],   // [tipo, agenteId, fechaIso, minutos]
-    r: [],    // respuestas de agentes del equipo hoy: [agenteId, fechaIso, minutosDeRespuesta|null]
-    cm: [],   // mensajes del cliente hoy: [fechaIso]
+    w: espera.desde,
+    ev: [], // actividad del equipo en el día de jornada: [tipo, agenteId, fechaIso, minutos]
+    cm: [], // mensajes del cliente en el día de jornada: [fechaIso]
   };
-
-  const hilos = conv._embedded && conv._embedded.threads;
-  if (!hilos) return c;
-  c.h = true;
+  if (borrada || conv.status === 'spam') return c;
 
   derivarEventos(conv, o.ctxEventos).forEach(ev => {
     if (ev.dia === o.hoy) c.ev.push([ev.tipo, ev.agenteId, ev.fecha.toISOString(), ev.minutos]);
   });
-
-  let clienteDesde = null;
-  hilos
-    .filter(t => !t.state || t.state === 'published')
-    .slice()
-    .sort((x, y) => (new Date(x.createdAt) - new Date(y.createdAt)) || (x.id - y.id))
-    .forEach(t => {
-      const autor = t.createdBy || {};
-      const fecha = new Date(t.createdAt);
-      const esHoy = o.dia(fecha) === o.hoy;
-      if (t.type === 'customer' || autor.type === 'customer') {
-        if (!clienteDesde) clienteDesde = fecha;
-        if (esHoy) c.cm.push(fecha.toISOString());
-        return;
-      }
-      if (autor.type !== 'user' || TIPOS_MENSAJE_.indexOf(t.type) < 0) return;
-      const agente = o.agentePorId(Number(autor.id));
-      if (agente && esHoy) {
-        c.r.push([agente.id, fecha.toISOString(),
-          clienteDesde ? Math.max(0, Math.round(o.minutos(fecha, clienteDesde) * 10) / 10) : null]);
-      }
-      clienteDesde = null;
-    });
+  hilosPublicados_(conv).forEach(h => {
+    const fecha = new Date(h.createdAt);
+    if ((h.type === 'customer' || (h.createdBy || {}).type === 'customer') && o.dia(fecha) === o.hoy) {
+      c.cm.push(fecha.toISOString());
+    }
+  });
   return c;
-}
-
-/** Nuevo compacto sobre el anterior: si el nuevo no trae hilos, conserva la actividad del día ya calculada. */
-function fusionarCompacto(previo, nuevo) {
-  if (nuevo.h || !previo || !previo.h) return nuevo;
-  return Object.assign({}, nuevo, { h: true, ev: previo.ev, r: previo.r, cm: previo.cm });
 }
 
 /** ¿Vale la pena guardar este compacto? (abierto y del equipo, sin asignar, o con actividad del equipo hoy) */
 function compactoRelevante(c, esDelEquipo, mostrarSinAsignar) {
   const abierto = c.st === 'active' || c.st === 'pending';
   if (abierto && c.a && esDelEquipo(c.a)) return true;
-  if (abierto && !c.a && mostrarSinAsignar && c.st === 'active') return true;
-  return c.ev.length > 0 || c.r.length > 0;
+  if (abierto && !c.a && mostrarSinAsignar) return true;
+  return c.ev.length > 0;
 }
 
 function promedio_(v) {
@@ -628,27 +635,18 @@ function armarPanelEnVivo(compactos, o) {
       const h = hoy[e[1]];
       if (!h) return;
       if (e[0] === 'PRIMERA_RESPUESTA') { if (e[3] != null) h.primeras.push(e[3]); return; }
-      if (h[e[0]]) h[e[0]].add(c.n);
-      const textos = {
-        ASIGNADO: nombre(e[1]) + ' tomó el #' + c.n,
-        CERRADO: nombre(e[1]) + ' cerró el #' + c.n,
-        REASIGNADO: nombre(e[1]) + ' re-asignó el #' + c.n,
-        NUEVA_CONSULTA: 'Nueva consulta en el #' + c.n + ' (' + nombre(e[1]) + ')',
-      };
-      if (textos[e[0]]) feed.push({ fecha: e[2], tipo: e[0], texto: textos[e[0]], url: url(c) });
-    });
-    c.r.forEach(r => {
-      const h = hoy[r[0]];
-      if (!h) return;
-      h.respuestas++;
-      h.casosRespondidos.add(c.n);
-      if (r[2] != null) h.tiempos.push(r[2]);
-      if (!h.ultimaRespuesta || r[1] > h.ultimaRespuesta) h.ultimaRespuesta = r[1];
-      feed.push({ fecha: r[1], tipo: 'RESPUESTA', texto: nombre(r[0]) + ' respondió el #' + c.n, url: url(c) });
+      if (e[0] === 'RESPUESTA') {
+        h.respuestas++;
+        h.casosRespondidos.add(c.n);
+        if (e[3] != null) h.tiempos.push(e[3]);
+        if (!h.ultimaRespuesta || e[2] > h.ultimaRespuesta) h.ultimaRespuesta = e[2];
+      } else if (h[e[0]]) {
+        h[e[0]].add(c.n);
+      }
+      feed.push({ fecha: e[2], tipo: e[0], agente: nombre(e[1]), numero: c.n, asunto: c.s, minutos: e[3], url: url(c) });
     });
     c.cm.forEach(f => {
-      const quien = c.a && porId[c.a] ? ' (' + nombre(c.a) + ')' : c.a ? '' : ' · sin asignar';
-      feed.push({ fecha: f, tipo: 'CLIENTE', texto: 'El cliente escribió en el #' + c.n + quien, url: url(c) });
+      feed.push({ fecha: f, tipo: 'CLIENTE', agente: c.a && porId[c.a] ? nombre(c.a) : '', numero: c.n, asunto: c.s, minutos: null, url: url(c) });
     });
   });
 
@@ -663,6 +661,8 @@ function armarPanelEnVivo(compactos, o) {
       esperando: esperando,
       seguimiento: suyos.length - esperando.length,
       abiertos: suyos.length,
+      activos: suyos.filter(t => t.estado === 'active').length,
+      pendientes: suyos.filter(t => t.estado === 'pending').length,
       hoy: h ? {
         respuestas: h.respuestas,
         casosRespondidos: h.casosRespondidos.size,
@@ -670,6 +670,7 @@ function armarPanelEnVivo(compactos, o) {
         cerrados: h.CERRADO.size,
         reasignados: h.REASIGNADO.size,
         nuevasConsultas: h.NUEVA_CONSULTA.size,
+        tiemposMedidos: h.tiempos.length,
         promedioRespuestaMin: promedio_(h.tiempos),
         medianaRespuestaMin: mediana_(h.tiempos),
         promedioPrimeraMin: promedio_(h.primeras),
@@ -687,17 +688,176 @@ function armarPanelEnVivo(compactos, o) {
     equipo: {
       esperando: agentes.reduce((s, a) => s + a.esperando.length, 0),
       seguimiento: agentes.reduce((s, a) => s + a.seguimiento, 0),
+      abiertos: agentes.reduce((s, a) => s + a.abiertos, 0),
       respuestas: sumar(h => h.respuestas),
       casosRespondidos: sumar(h => h.casosRespondidos.size),
       asignados: sumar(h => h.ASIGNADO.size),
       cerrados: sumar(h => h.CERRADO.size),
       reasignados: sumar(h => h.REASIGNADO.size),
       nuevasConsultas: sumar(h => h.NUEVA_CONSULTA.size),
+      tiemposMedidos: todos('tiempos').length,
       promedioRespuestaMin: promedio_(todos('tiempos')),
       medianaRespuestaMin: mediana_(todos('tiempos')),
       promedioPrimeraMin: promedio_(todos('primeras')),
     },
     feed: feed.sort((x, y) => (x.fecha < y.fecha ? 1 : x.fecha > y.fecha ? -1 : 0)).slice(0, o.maxFeed || 40),
+  };
+}
+
+/**
+ * Detalle de una agente para auditar sus cifras: cada movimiento del día y sus casos abiertos.
+ * Los totales de la tabla del panel salen exactamente de estas listas.
+ */
+function detalleAgenteEnVivo(compactos, agente) {
+  const url = c => 'https://secure.helpscout.net/conversation/' + c.id + '/' + c.n;
+  const movimientos = [];
+  const abiertos = [];
+  compactos.forEach(c => {
+    if ((c.st === 'active' || c.st === 'pending') && c.a === agente.id) {
+      abiertos.push({ numero: c.n, asunto: c.s, cliente: c.c, estado: c.st, esperaDesde: c.w, url: url(c) });
+    }
+    c.ev.forEach(e => {
+      if (e[1] !== agente.id) return;
+      movimientos.push({ fecha: e[2], tipo: e[0], numero: c.n, asunto: c.s, minutos: e[3], url: url(c) });
+    });
+  });
+  return {
+    agente: agente.nombre,
+    movimientos: movimientos.sort((x, y) => (x.fecha < y.fecha ? 1 : -1)),
+    abiertos: abiertos.sort((x, y) => String(x.esperaDesde || '9').localeCompare(String(y.esperaDesde || '9'))),
+  };
+}
+
+// ===== Reporte.gs =====
+/**
+ * Reporte para exportar — cálculo puro (sin servicios de Apps Script), se prueba con Node en tests/.
+ * Usa los mismos eventos de HS_Eventos y las mismas reglas (contarDia) que llenan el tracker,
+ * así que las cantidades por día coinciden con las de las hojas mensuales.
+ */
+
+/** Estadísticas de una lista de minutos. meta (en minutos) es opcional. */
+function estadisticasMinutos(valores, meta) {
+  const v = valores.filter(m => typeof m === 'number' && !isNaN(m)).sort((a, b) => a - b);
+  if (!v.length) return { n: 0, promedio: null, mediana: null, p90: null, maximo: null, pctEnMeta: null };
+  const r1 = x => Math.round(x * 10) / 10;
+  const mitad = Math.floor(v.length / 2);
+  return {
+    n: v.length,
+    promedio: r1(v.reduce((s, m) => s + m, 0) / v.length),
+    mediana: r1(v.length % 2 ? v[mitad] : (v[mitad - 1] + v[mitad]) / 2),
+    p90: r1(v[Math.max(0, Math.ceil(v.length * 0.9) - 1)]), // el 90% de los casos tardó esto o menos
+    maximo: r1(v[v.length - 1]),
+    pctEnMeta: meta == null ? null : v.filter(m => m <= meta).length / v.length,
+  };
+}
+
+/**
+ * @param {Object[]} eventos  filas de HS_Eventos: { dia, fecha, tipo, agente, numero, asunto, minutos, enlace }
+ * @param {Object} fotos      'día|agente normalizado' → { total, casos } (hoja HS_InicioJornada)
+ * @param {Object} f
+ *   desde, hasta          'yyyy-MM-dd' (incluidos)
+ *   agentes               nombres de los agentes a incluir
+ *   tipos                 (opcional) tipos de evento para la hoja de detalle
+ *   metaRespuestaMin, metaResolucionHoras, semaforo
+ */
+function calcularReporte(eventos, fotos, f) {
+  const nombres = {};
+  f.agentes.forEach(n => { nombres[normalizarTexto(n)] = n; });
+  const enRango = e => e.dia && e.dia >= f.desde && e.dia <= f.hasta && nombres[normalizarTexto(e.agente)];
+  const propios = eventos.filter(enRango);
+
+  const grupos = {}; // 'día|agente' → eventos
+  propios.forEach(e => {
+    const k = e.dia + '|' + normalizarTexto(e.agente);
+    (grupos[k] = grupos[k] || []).push(e);
+  });
+  // Días con foto de inicio de jornada pero sin movimientos.
+  Object.keys(fotos || {}).forEach(k => {
+    const dia = k.split('|')[0];
+    const ag = k.slice(dia.length + 1);
+    if (dia >= f.desde && dia <= f.hasta && nombres[ag] && !grupos[k] && fotos[k].total > 0) grupos[k] = [];
+  });
+
+  const minutosDe = (evs, tipo) => evs.filter(e => e.tipo === tipo && e.minutos != null).map(e => Number(e.minutos));
+  const acumulado = agente => ({
+    agente: agente, dias: 0, sinAtender: 0, asignados: 0, nuevaConsulta: 0, reasignados: 0, total: 0, cerrados: 0,
+    verde: 0, amarillo: 0, rojo: 0, respuestas: 0, casos: new Set(), tResp: [], tPrimera: [], tResol: [],
+  });
+  const porAgente = {};
+  f.agentes.forEach(n => { porAgente[normalizarTexto(n)] = acumulado(n); });
+  const equipo = acumulado('EQUIPO');
+
+  const porDia = Object.keys(grupos).sort().map(k => {
+    const dia = k.split('|')[0];
+    const ag = k.slice(dia.length + 1);
+    const evs = grupos[k];
+    const m = contarDia(evs, fotos && fotos[k]);
+    const respuestas = evs.filter(e => e.tipo === 'RESPUESTA');
+    const casos = new Set(respuestas.map(e => String(e.numero)));
+    const tResp = minutosDe(evs, 'RESPUESTA');
+    const tPrimera = minutosDe(evs, 'PRIMERA_RESPUESTA');
+    const tResol = minutosDe(evs, 'CERRADO');
+    const ratio = m.total > 0 ? m.cerrados / m.total : null;
+    const color = colorSemaforo(ratio, f.semaforo);
+    const trabajado = m.total > 0 || m.cerrados > 0;
+
+    [porAgente[ag], equipo].forEach(a => {
+      if (trabajado) a.dias++;
+      ['sinAtender', 'asignados', 'nuevaConsulta', 'reasignados', 'total', 'cerrados'].forEach(c => { a[c] += m[c]; });
+      if (color) a[color.toLowerCase()]++;
+      a.respuestas += respuestas.length;
+      casos.forEach(n => a.casos.add(n));
+      a.tResp = a.tResp.concat(tResp);
+      a.tPrimera = a.tPrimera.concat(tPrimera);
+      a.tResol = a.tResol.concat(tResol);
+    });
+    const sr = estadisticasMinutos(tResp, f.metaRespuestaMin);
+    const sp = estadisticasMinutos(tPrimera);
+    const so = estadisticasMinutos(tResol);
+    return {
+      dia: dia, agente: nombres[ag],
+      sinAtender: m.sinAtender, asignados: m.asignados, nuevaConsulta: m.nuevaConsulta, reasignados: m.reasignados,
+      total: m.total, cerrados: m.cerrados, pendientes: m.pendientes, pctResolucion: ratio, semaforo: color,
+      respuestas: respuestas.length, casosRespondidos: casos.size,
+      respuestaPromMin: sr.promedio, respuestaMedianaMin: sr.mediana, respuestaEnMeta: sr.pctEnMeta,
+      primeraPromMin: sp.promedio,
+      resolucionPromH: so.promedio == null ? null : Math.round(so.promedio / 60 * 10) / 10,
+    };
+  });
+
+  const aHoras = x => (x == null ? null : Math.round(x / 60 * 10) / 10);
+  const fila = a => {
+    const sr = estadisticasMinutos(a.tResp, f.metaRespuestaMin);
+    const sp = estadisticasMinutos(a.tPrimera);
+    const so = estadisticasMinutos(a.tResol, f.metaResolucionHoras * 60);
+    return {
+      agente: a.agente, dias: a.dias,
+      sinAtender: a.sinAtender, asignados: a.asignados, nuevaConsulta: a.nuevaConsulta, reasignados: a.reasignados,
+      total: a.total, cerrados: a.cerrados, pctResolucion: a.total > 0 ? a.cerrados / a.total : null,
+      verde: a.verde, amarillo: a.amarillo, rojo: a.rojo,
+      respuestas: a.respuestas, casosRespondidos: a.casos.size,
+      respuestasPorDia: a.dias ? Math.round(a.respuestas / a.dias * 10) / 10 : null,
+      respuestasMedidas: sr.n, respuestaPromMin: sr.promedio, respuestaMedianaMin: sr.mediana, respuestaP90Min: sr.p90,
+      respuestaMaxMin: sr.maximo, respuestaEnMeta: sr.pctEnMeta,
+      primerasMedidas: sp.n, primeraPromMin: sp.promedio, primeraMedianaMin: sp.mediana, primeraP90Min: sp.p90,
+      resolucionesMedidas: so.n, resolucionPromH: aHoras(so.promedio), resolucionMedianaH: aHoras(so.mediana),
+      resolucionP90H: aHoras(so.p90), resolucionEnMeta: so.pctEnMeta,
+    };
+  };
+
+  const tipos = f.tipos && f.tipos.length ? f.tipos : null;
+  return {
+    filtros: { desde: f.desde, hasta: f.hasta, agentes: f.agentes.slice(), tipos: tipos },
+    porAgente: f.agentes.map(n => fila(porAgente[normalizarTexto(n)])).concat([fila(equipo)]),
+    porDia: porDia,
+    detalle: propios
+      .filter(e => !tipos || tipos.indexOf(e.tipo) >= 0)
+      .sort((x, y) => String(x.fecha).localeCompare(String(y.fecha)))
+      .map(e => ({
+        dia: e.dia, fecha: e.fecha, tipo: e.tipo, agente: nombres[normalizarTexto(e.agente)],
+        numero: e.numero, asunto: e.asunto, minutos: e.minutos, enlace: e.enlace,
+      })),
+    eventosTotales: propios.length,
   };
 }
 
@@ -772,13 +932,22 @@ function hsGet_(ruta, params) {
  * maxPaginas (opcional) corta la lectura después de esa cantidad de páginas.
  */
 function hsListarTodo_(ruta, params, clave, maxPaginas) {
+  return hsListarConTotal_(ruta, params, clave, maxPaginas).items;
+}
+
+/** Igual que hsListarTodo_, pero devuelve también el total que informa Help Scout (para verificar). */
+function hsListarConTotal_(ruta, params, clave, maxPaginas) {
   const todos = [];
+  let total = null;
   for (let pagina = 1; ; pagina++) {
     const data = hsGet_(ruta, Object.assign({}, params, { page: pagina }));
     const items = (data._embedded && data._embedded[clave]) || [];
     Array.prototype.push.apply(todos, items);
+    if (data.page && typeof data.page.totalElements === 'number') total = data.page.totalElements;
     const totalPaginas = data.page ? data.page.totalPages : 1;
-    if (!items.length || pagina >= totalPaginas || (maxPaginas && pagina >= maxPaginas)) return todos;
+    if (!items.length || pagina >= totalPaginas || (maxPaginas && pagina >= maxPaginas)) {
+      return { items: todos, total: total, completo: !items.length || pagina >= totalPaginas };
+    }
   }
 }
 
@@ -851,6 +1020,7 @@ function sincronizar_() {
     tagsReasignacion: CONFIG.TAGS_REASIGNACION,
     transferenciaInternaEsReasignacion: CONFIG.TRANSFERENCIA_INTERNA_ES_REASIGNACION,
     fechaInicio: CONFIG.FECHA_INICIO,
+    incluirRespuestas: true, // cada respuesta queda en HS_Eventos (para el panel y la exportación)
     minutos: (fin, inicio) => minutosGestion(relojLocal_(inicio, tz), relojLocal_(fin, tz), CONFIG.HORARIO_LABORAL),
   };
 
@@ -1393,7 +1563,7 @@ function calcularRespuestaPanel_() {
   const cfg = CONFIG.PANEL;
   const k = contextoPanel_();
   let estado = leerCacheGrande_(CLAVE_ESTADO_PANEL_);
-  const vencido = !estado || estado.v !== 1 || estado.dia !== k.hoy ||
+  const vencido = !estado || estado.v !== 2 || estado.dia !== k.hoy ||
     Date.now() - new Date(estado.base).getTime() > cfg.MINUTOS_RECARGA_COMPLETA * 60000;
   if (vencido) estado = recargaCompletaPanel_(k);
   else actualizarPanel_(estado, k);
@@ -1421,6 +1591,10 @@ function calcularRespuestaPanel_() {
     metaRespuestaMin: cfg.META_RESPUESTA_MIN,
     alertaSinResponderMin: cfg.ALERTA_SIN_RESPONDER_MIN,
     ultimaRecargaCompleta: estado.base,
+    verificacion: estado.verificacion,
+    agentes: k.equipo.agentes.map(a => a.nombre),
+    fechaInicio: CONFIG.FECHA_INICIO,
+    metaResolucionHoras: CONFIG.META_RESOLUCION_HORAS,
     sinVincular: k.equipo.sinEncontrar,
     panel: panel,
   };
@@ -1442,11 +1616,10 @@ function contextoPanel_() {
     equipo: equipo,
     mailbox: CONFIG.MAILBOXES_EQUIPO.length ? CONFIG.MAILBOXES_EQUIPO.join(',') : undefined,
     o: {
-      agentePorId: agentePorId,
       dia: dia,
       hoy: hoy,
-      minutos: minutos,
       ctxEventos: {
+        incluirRespuestas: true,
         agentePorId: agentePorId,
         dia: dia,
         mailboxesEquipo: CONFIG.MAILBOXES_EQUIPO,
@@ -1459,54 +1632,81 @@ function contextoPanel_() {
   };
 }
 
-/** Guarda (o descarta) una conversación en el estado del panel. */
+/** Guarda (o descarta) una conversación en el estado del panel. Siempre llega con sus hilos. */
 function guardarEnPanel_(convs, conv, k) {
-  const c = fusionarCompacto(convs[conv.id], resumirConversacion(conv, k.o));
+  const c = resumirConversacion(completarHilos_(conv), k.o);
   if (compactoRelevante(c, id => !!k.equipo.porId[id], CONFIG.PANEL.MOSTRAR_SIN_ASIGNAR)) convs[c.id] = c;
   else delete convs[c.id];
+}
+
+/** Si el listado no trajo todos los hilos de la conversación, los pide aparte. */
+function completarHilos_(conv) {
+  conv._embedded = conv._embedded || {};
+  const hilos = conv._embedded.threads;
+  if (!hilos || (typeof conv.threads === 'number' && conv.threads > hilos.length)) {
+    conv._embedded.threads = hsHilos_(conv.id);
+  }
+  return conv;
 }
 
 function recargaCompletaPanel_(k) {
   const cfg = CONFIG.PANEL;
   const inicio = new Date();
   const convs = {};
-  // 1) Casos abiertos de cada agente.
-  k.equipo.agentes.filter(a => a.id).forEach(a => ['active', 'pending'].forEach(estado =>
-    hsListarTodo_('/conversations', { status: estado, assigned_to: a.id, mailbox: k.mailbox }, 'conversations')
-      .forEach(conv => guardarEnPanel_(convs, conv, k))));
+  const control = []; // lo que dice Help Scout vs. lo que se leyó, para verificar
+  // 1) Casos abiertos de cada agente (con su historial, para saber si el cliente está esperando).
+  k.equipo.agentes.filter(a => a.id).forEach(a => ['active', 'pending'].forEach(estado => {
+    const r = hsListarConTotal_('/conversations',
+      { status: estado, assigned_to: a.id, mailbox: k.mailbox, embed: 'threads' }, 'conversations');
+    r.items.forEach(conv => guardarEnPanel_(convs, conv, k));
+    control.push({ agente: a.nombre, estado: estado, helpScout: r.total, leidos: r.items.length });
+  }));
   // 2) Cola sin asignar.
+  let colaCompleta = true;
   if (cfg.MOSTRAR_SIN_ASIGNAR) {
-    hsListarTodo_('/conversations', { status: 'active', mailbox: k.mailbox }, 'conversations', cfg.MAX_PAGINAS_SIN_ASIGNAR)
+    const base = { status: 'active', mailbox: k.mailbox, embed: 'threads' };
+    let r;
+    try { // el filtro de búsqueda evita leer los casos ya asignados
+      r = hsListarConTotal_('/conversations', Object.assign({ query: '(assigned:"Unassigned")' }, base),
+        'conversations', cfg.MAX_PAGINAS_SIN_ASIGNAR);
+    } catch (e) {
+      r = hsListarConTotal_('/conversations', base, 'conversations', cfg.MAX_PAGINAS_SIN_ASIGNAR);
+    }
+    r.items
       .filter(conv => !(conv.assignee && Number(conv.assignee.id) > 0))
       .forEach(conv => guardarEnPanel_(convs, conv, k));
+    colaCompleta = r.completo;
   }
-  // 3) Todo lo que se movió en el día de jornada (con su historial).
+  // 3) Todo lo que se movió en el día de jornada.
   const desde = Utilities.parseDate(inicioVentanaJornada(k.hoy, CONFIG.HORARIO_LABORAL), k.tz, 'yyyy-MM-dd HH:mm:ss');
-  conversacionesConHilos_(hsFechaIso_(desde), k.mailbox, cfg.MAX_PAGINAS_DIA)
-    .forEach(conv => guardarEnPanel_(convs, conv, k));
-  return { v: 1, dia: k.hoy, base: inicio.toISOString(), cursor: inicio.toISOString(), convs: convs };
+  const dia = hsListarConTotal_('/conversations', {
+    status: 'all', modifiedSince: hsFechaIso_(desde), sortField: 'modifiedAt', sortOrder: 'desc', embed: 'threads', mailbox: k.mailbox,
+  }, 'conversations', cfg.MAX_PAGINAS_DIA);
+  dia.items.forEach(conv => guardarEnPanel_(convs, conv, k));
+
+  const descuadres = control.filter(c => c.helpScout != null && c.helpScout !== c.leidos);
+  return {
+    v: 2, dia: k.hoy, base: inicio.toISOString(), cursor: inicio.toISOString(), convs: convs,
+    verificacion: {
+      hora: inicio.toISOString(),
+      ok: !descuadres.length && dia.completo && colaCompleta,
+      casosAbiertos: control.reduce((s, c) => s + c.leidos, 0),
+      casosDelDia: dia.items.length,
+      avisos: descuadres.map(c => c.agente + ' (' + c.estado + '): Help Scout informa ' + c.helpScout + ' y se leyeron ' + c.leidos)
+        .concat(dia.completo ? [] : ['Hoy hay más movimientos de los que se leyeron: sube CONFIG.PANEL.MAX_PAGINAS_DIA.'])
+        .concat(colaCompleta ? [] : ['La cola sin asignar tiene más casos de los que se muestran: sube MAX_PAGINAS_SIN_ASIGNAR.']),
+    },
+  };
 }
 
 function actualizarPanel_(estado, k) {
   const inicio = new Date();
-  // 1 minuto de solape: cada conversación se recalcula entera, así que repetirla no duplica nada.
-  const desde = new Date(new Date(estado.cursor).getTime() - 60000);
-  conversacionesConHilos_(hsFechaIso_(desde), k.mailbox, 10)
-    .forEach(conv => guardarEnPanel_(estado.convs, conv, k));
+  // 2 minutos de solape: cada conversación se recalcula entera, así que repetirla no duplica nada.
+  const desde = new Date(new Date(estado.cursor).getTime() - 120000);
+  hsListarTodo_('/conversations', {
+    status: 'all', modifiedSince: hsFechaIso_(desde), sortField: 'modifiedAt', sortOrder: 'desc', embed: 'threads', mailbox: k.mailbox,
+  }, 'conversations', 10).forEach(conv => guardarEnPanel_(estado.convs, conv, k));
   estado.cursor = inicio.toISOString();
-}
-
-/** Conversaciones modificadas desde `desde`, con todos sus hilos. */
-function conversacionesConHilos_(desde, mailbox, maxPaginas) {
-  const convs = hsListarTodo_('/conversations', {
-    status: 'all', modifiedSince: desde, sortField: 'modifiedAt', sortOrder: 'desc', embed: 'threads', mailbox: mailbox,
-  }, 'conversations', maxPaginas);
-  convs.forEach(conv => {
-    conv._embedded = conv._embedded || {};
-    const hilos = conv._embedded.threads || [];
-    if (typeof conv.threads === 'number' && conv.threads > hilos.length) conv._embedded.threads = hsHilos_(conv.id);
-  });
-  return convs;
 }
 
 function buzonesPorId_() {
@@ -1549,19 +1749,173 @@ function leerCacheGrande_(clave) {
   }
 }
 
-/** Menú: muestra el enlace del panel (o cómo publicarlo). */
+/** Lo llama la página: movimientos de hoy y casos abiertos de una agente (para auditar sus cifras). */
+function detalleAgentePanel(agenteId) {
+  try {
+    const estado = leerCacheGrande_(CLAVE_ESTADO_PANEL_);
+    if (!estado) throw new Error('Todavía no hay datos cargados. Espera la siguiente actualización.');
+    const agente = resolverEquipo_().porId[Number(agenteId)];
+    if (!agente) throw new Error('Agente no encontrada.');
+    const d = detalleAgenteEnVivo(Object.keys(estado.convs).map(id => estado.convs[id]), agente);
+    d.ok = true;
+    d.hoy = estado.dia;
+    return JSON.stringify(d);
+  } catch (e) {
+    return JSON.stringify({ ok: false, error: String(e && e.message || e) });
+  }
+}
+
+/**
+ * Lo llama la página: reporte por agente y por día entre dos fechas, a partir de HS_Eventos.
+ * @param {{desde: string, hasta: string, agentes: string[], tipos: string[]}} filtros
+ */
+function reporteMetricas(filtros) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    if (!ss) {
+      throw new Error('La página no pudo abrir la hoja del tracker. Abre el panel desde la hoja: ' +
+        'menú Help Scout → Panel en vivo → "Abrir aquí".');
+    }
+    const fecha = v => (/^\d{4}-\d{2}-\d{2}$/.test(String(v)) ? String(v) : null);
+    const desde = fecha(filtros && filtros.desde);
+    const hasta = fecha(filtros && filtros.hasta);
+    if (!desde || !hasta || desde > hasta) throw new Error('Rango de fechas no válido.');
+    const equipo = CONFIG.AGENTES.map(a => a.nombre);
+    const pedidos = (filtros.agentes || []).map(normalizarTexto);
+    const agentes = pedidos.length ? equipo.filter(n => pedidos.indexOf(normalizarTexto(n)) >= 0) : equipo;
+    if (!agentes.length) throw new Error('Elige al menos una agente.');
+
+    const tz = ss.getSpreadsheetTimeZone();
+    const reporte = calcularReporte(leerEventosCompletos_(ss), leerFotos_(ss), {
+      desde: desde < CONFIG.FECHA_INICIO ? CONFIG.FECHA_INICIO : desde,
+      hasta: hasta,
+      agentes: agentes,
+      tipos: filtros.tipos || [],
+      metaRespuestaMin: CONFIG.PANEL.META_RESPUESTA_MIN,
+      metaResolucionHoras: CONFIG.META_RESOLUCION_HORAS,
+      semaforo: CONFIG.SEMAFORO,
+    });
+    const props = PropertiesService.getScriptProperties();
+    const ultima = props.getProperty('HS_ULTIMA_SYNC');
+    const pendiente = JSON.parse(props.getProperty('HS_ESTADO_SYNC') || 'null');
+    reporte.ok = true;
+    reporte.generado = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd HH:mm');
+    reporte.ultimaSincronizacion = ultima ? Utilities.formatDate(new Date(ultima), tz, 'yyyy-MM-dd HH:mm') : null;
+    reporte.sincronizacionIncompleta = !!(pendiente && pendiente.pagina > 1);
+    reporte.fechaInicio = CONFIG.FECHA_INICIO;
+    reporte.config = {
+      horario: CONFIG.HORARIO_LABORAL, metaRespuestaMin: CONFIG.PANEL.META_RESPUESTA_MIN,
+      metaResolucionHoras: CONFIG.META_RESOLUCION_HORAS, semaforo: CONFIG.SEMAFORO, zonaHoraria: tz,
+    };
+    return JSON.stringify(reporte);
+  } catch (e) {
+    console.error(e);
+    return JSON.stringify({ ok: false, error: String(e && e.message || e) });
+  }
+}
+
+/** Todas las columnas de HS_Eventos, con la fecha como texto en la zona horaria de la hoja. */
+function leerEventosCompletos_(ss) {
+  const hoja = ss.getSheetByName(CONFIG.HOJAS.eventos);
+  if (!hoja) return [];
+  const tz = ss.getSpreadsheetTimeZone();
+  const formatear = f => Utilities.formatDate(f, tz, 'yyyy-MM-dd');
+  return leerFilas_(hoja).map(f => ({
+    dia: diaDesdeCelda(f[1], formatear),
+    fecha: f[2] instanceof Date ? Utilities.formatDate(f[2], tz, 'yyyy-MM-dd HH:mm:ss') : String(f[2] || ''),
+    tipo: String(f[3]), agente: String(f[4]), numero: Number(f[6]), asunto: String(f[7] || ''),
+    minutos: f[8] === '' || f[8] == null ? null : Number(f[8]), enlace: String(f[10] || ''),
+  }));
+}
+
+/** Menú: abre el panel dentro de la hoja y muestra el enlace de la página aparte. */
 function menuPanelEnVivo() {
   let url = '';
   try { url = ScriptApp.getService().getUrl(); } catch (e) { url = ''; }
-  const html = url
-    ? '<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.5">' +
-      '<p>Tu panel en vivo está en:</p><p><a href="' + url + '" target="_blank" style="font-weight:bold">Abrir panel en vivo ↗</a></p>' +
-      '<p style="color:#555">Guárdalo en favoritos. Si cambiaste el código, ve a <b>Implementar → Gestionar implementaciones → ✏️ → Versión: nueva</b> para que el panel use la versión nueva.</p></div>'
-    : '<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.5">' +
-      '<p>El panel todavía no está publicado. En <b>Extensiones → Apps Script</b>:</p>' +
-      '<ol><li><b>Implementar → Nueva implementación</b></li><li>Tipo: <b>Aplicación web</b></li>' +
-      '<li>Ejecutar como: <b>Yo</b> · Quién tiene acceso: <b>Solo yo</b></li><li><b>Implementar</b> y copia la URL.</li></ol></div>';
-  SpreadsheetApp.getUi().showModalDialog(HtmlService.createHtmlOutput(html).setWidth(460).setHeight(260), 'Panel en vivo');
+  const estilo = 'font-family:Arial,sans-serif;font-size:14px;line-height:1.5';
+  const html = '<div style="' + estilo + '">' + (url
+    ? '<p><b>Página aparte:</b> <a href="' + url + '" target="_blank">abrir el panel en una pestaña nueva</a> (guárdala en favoritos).</p>' +
+      '<p style="color:#555">Si cambiaste el código: <b>Implementar → Gestionar implementaciones → editar → Versión: Nueva versión</b>.</p>'
+    : '<p><b>Página aparte:</b> todavía no está publicada. En <b>Extensiones → Apps Script</b>: <b>Implementar → Nueva implementación → Aplicación web</b>, ' +
+      'ejecutar como <b>Yo</b>, acceso <b>Solo yo</b>.</p>') +
+    '<p><button onclick="google.script.run.withSuccessHandler(google.script.host.close).abrirPanelAqui()" ' +
+    'style="padding:8px 14px;font-size:14px;cursor:pointer">Abrir aquí, dentro de la hoja</button></p></div>';
+  SpreadsheetApp.getUi().showModalDialog(HtmlService.createHtmlOutput(html).setWidth(480).setHeight(230), 'Panel en vivo');
+}
+
+function abrirPanelAqui() {
+  SpreadsheetApp.getUi().showModelessDialog(paginaPanel_().setWidth(1500).setHeight(900), 'Panel en vivo · Soporte');
+}
+
+/**
+ * Menú: compara el panel con Help Scout y deja el resultado en la hoja HS_VerificacionPanel,
+ * con la lista de casos que el panel considera "esperando respuesta" para revisarlos uno por uno.
+ */
+function menuVerificarPanel() {
+  const ss = SpreadsheetApp.getActive();
+  const k = contextoPanel_();
+  const estado = recargaCompletaPanel_(k);
+  const compactos = Object.keys(estado.convs).map(id => estado.convs[id]);
+  const panel = armarPanelEnVivo(compactos, { agentes: k.equipo.agentes, mostrarSinAsignar: CONFIG.PANEL.MOSTRAR_SIN_ASIGNAR, maxFeed: 1 });
+  const total = (agenteId, estadoHs) => hsGet_('/conversations', { status: estadoHs, assigned_to: agenteId, mailbox: k.mailbox }).page.totalElements;
+
+  const filas = [['VERIFICACIÓN DEL PANEL EN VIVO', Utilities.formatDate(new Date(), k.tz, 'dd/MM/yyyy HH:mm:ss'), '', '', '', '', '', '', ''],
+    ['Agente', 'Active en Help Scout', 'Pending en Help Scout', 'Abiertos en Help Scout', 'Abiertos en el panel', '¿Coincide?',
+      'Cliente esperando (panel)', 'En seguimiento (panel)', 'Respuestas hoy (panel)']];
+  panel.agentes.filter(a => a.vinculado).forEach(a => {
+    const act = total(a.id, 'active');
+    const pen = total(a.id, 'pending');
+    filas.push([a.nombre, act, pen, act + pen, a.abiertos, act + pen === a.abiertos ? 'SÍ' : 'NO — avisar',
+      a.esperando.length, a.seguimiento, a.hoy.respuestas]);
+  });
+  filas.push(['', '', '', '', '', '', '', '', '']);
+  filas.push(['CASOS CON EL CLIENTE ESPERANDO (ábrelos en Help Scout: el último mensaje debe ser del cliente)', '', '', '', '', '', '', '', '']);
+  filas.push(['Agente', '# Caso', 'Estado', 'Cliente espera desde', 'Asunto', 'Enlace', '', '', '']);
+  panel.agentes.forEach(a => a.esperando.forEach(t => filas.push([a.nombre, t.numero, t.estado,
+    Utilities.formatDate(new Date(t.esperaDesde), k.tz, 'dd/MM/yyyy HH:mm:ss'), t.asunto, t.url, '', '', ''])));
+  panel.sinAsignar.forEach(t => filas.push(['(sin asignar)', t.numero, t.estado,
+    Utilities.formatDate(new Date(t.esperaDesde), k.tz, 'dd/MM/yyyy HH:mm:ss'), t.asunto, t.url, '', '', '']));
+
+  // Quién escribe los mensajes de hoy: sirve para detectar respuestas automáticas (workflows).
+  const desde = Utilities.parseDate(inicioVentanaJornada(k.hoy, CONFIG.HORARIO_LABORAL), k.tz, 'yyyy-MM-dd HH:mm:ss');
+  const origen = {};
+  hsListarTodo_('/conversations', { status: 'all', modifiedSince: hsFechaIso_(desde), embed: 'threads', mailbox: k.mailbox },
+    'conversations', CONFIG.PANEL.MAX_PAGINAS_DIA).forEach(conv => ((conv._embedded && conv._embedded.threads) || []).forEach(h => {
+    if (k.o.dia(new Date(h.createdAt)) !== k.hoy || ['message', 'chat', 'phone', 'customer'].indexOf(h.type) < 0) return;
+    const clave = [h.type, (h.createdBy || {}).type || '', (h.source || {}).type || '', (h.source || {}).via || '',
+      (h.action || {}).type || '', h.savedReplyId ? 'con respuesta guardada' : ''].join(' | ');
+    origen[clave] = (origen[clave] || 0) + 1;
+  }));
+  filas.push(['', '', '', '', '', '', '', '', '']);
+  filas.push(['MENSAJES DE HOY POR ORIGEN (tipo | autor | fuente | vía | acción | respuesta guardada)', 'Cantidad', '', '', '', '', '', '', '']);
+  Object.keys(origen).sort().forEach(c => filas.push([c, origen[c], '', '', '', '', '', '', '']));
+
+  let hoja = ss.getSheetByName('HS_VerificacionPanel');
+  if (!hoja) hoja = ss.insertSheet('HS_VerificacionPanel', ss.getNumSheets());
+  hoja.clear();
+  hoja.getRange(1, 1, filas.length, 9).setValues(filas);
+  hoja.getRange(1, 1, 2, 9).setFontWeight('bold');
+  ss.setActiveSheet(hoja);
+  const mal = filas.filter(f => String(f[5]).indexOf('NO') === 0).length;
+  SpreadsheetApp.getUi().alert(mal
+    ? '⚠️ Hay ' + mal + ' agente(s) cuyo total no coincide con Help Scout. Revisa la hoja HS_VerificacionPanel.'
+    : '✅ Los casos abiertos del panel coinciden con Help Scout para todas las agentes.\n' +
+      'En la hoja HS_VerificacionPanel está la lista de casos "esperando" para revisarlos uno por uno.');
+}
+
+/** Menú: vuelve a leer Help Scout desde FECHA_INICIO y agrega a HS_Eventos lo que falte (sin borrar nada). */
+function menuCompletarHistorial() {
+  const ui = SpreadsheetApp.getUi();
+  const r = ui.alert('Completar historial',
+    'Se volverá a leer Help Scout desde ' + CONFIG.FECHA_INICIO + ' para agregar a HS_Eventos cada respuesta de las agentes ' +
+    '(necesario para exportar respuestas y tiempos de respuesta de días pasados). No se borra nada.\n' +
+    'Tarda varias sincronizaciones (15–60 min). ¿Continuar?', ui.ButtonSet.YES_NO);
+  if (r !== ui.Button.YES) return;
+  const tz = SpreadsheetApp.getActive().getSpreadsheetTimeZone();
+  PropertiesService.getScriptProperties().setProperty('HS_ESTADO_SYNC', JSON.stringify({
+    desde: hsFechaIso_(Utilities.parseDate(CONFIG.FECHA_INICIO, tz, 'yyyy-MM-dd')), pagina: 1,
+  }));
+  ui.alert('Listo. La sincronización automática irá completando el historial. Revisa "Help Scout → Ver estado".');
 }
 
 // ===== Menu.gs =====
@@ -1574,7 +1928,9 @@ function onOpen() {
     .addItem('2. Ver usuarios y buzones de Help Scout', 'menuListarUsuarios')
     .addItem('3. Activar sincronización automática', 'menuActivar')
     .addSeparator()
-    .addItem('📡 Panel en vivo', 'menuPanelEnVivo')
+    .addItem('Panel en vivo', 'menuPanelEnVivo')
+    .addItem('Verificar panel contra Help Scout', 'menuVerificarPanel')
+    .addItem('Completar historial de respuestas (para exportar)', 'menuCompletarHistorial')
     .addSeparator()
     .addItem('Sincronizar ahora', 'menuSincronizar')
     .addItem('Tomar foto de inicio de jornada ahora', 'menuFoto')
@@ -1722,4 +2078,4 @@ function eliminarActivadores_() {
 }
 
 // ===== Panel.html =====
-const PANEL_HTML = "<!DOCTYPE html>\n<html lang=\"es\">\n<head>\n<base target=\"_top\">\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>Centro de control · Soporte en vivo</title>\n<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>\n<link href=\"https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap\" rel=\"stylesheet\">\n<style>\n:root {\n  --bg: #0A0D13;\n  --panel: #10151E;\n  --panel-2: #151B26;\n  --panel-3: #1B2230;\n  --line: #222B3A;\n  --line-2: #2C3648;\n  --ink: #EEF1F6;\n  --muted: #8F9AAE;\n  --accent: #7C93FF;\n  --accent-ink: #0A0D13;\n  --ok: #3ED598;\n  --ok-bg: rgba(62, 213, 152, .12);\n  --warn: #F7C04A;\n  --warn-bg: rgba(247, 192, 74, .13);\n  --late: #FF7A7A;\n  --late-bg: rgba(255, 122, 122, .14);\n  --radius: 16px;\n}\n* { box-sizing: border-box; }\nhtml, body { margin: 0; background: var(--bg); color: var(--ink); }\nbody {\n  font-family: 'Montserrat', system-ui, sans-serif; font-size: 14px; line-height: 1.45;\n  font-feature-settings: 'tnum' 1, 'lnum' 1; -webkit-font-smoothing: antialiased;\n}\na { color: inherit; text-decoration: none; }\na:hover { color: var(--accent); }\nbutton { font: inherit; color: inherit; }\n.wrap { max-width: 1600px; margin: 0 auto; padding: 0 24px 40px; }\n\n/* Barra superior */\n.top { position: sticky; top: 0; z-index: 5; background: rgba(10, 13, 19, .92); backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }\n.top-in { max-width: 1600px; margin: 0 auto; padding: 14px 24px; display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }\n.brand { display: flex; align-items: center; gap: 12px; margin-right: auto; }\n.mark { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; background: linear-gradient(145deg, #2A3A7A, #1A2246); border: 1px solid #34437F; }\n.brand h1 { margin: 0; font-size: 17px; font-weight: 700; letter-spacing: -.01em; }\n.brand p { margin: 0; font-size: 12px; color: var(--muted); font-weight: 500; }\n.pill { display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 12px; border-radius: 999px; font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }\n.pill .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }\n.pill.vivo { color: var(--ok); background: var(--ok-bg); }\n.pill.vivo .dot { animation: pulso 1.6s ease-out infinite; }\n.pill.pausa, .pill.fuera { color: var(--warn); background: var(--warn-bg); }\n.pill.error { color: var(--late); background: var(--late-bg); }\n.pill.cargando { color: var(--muted); background: var(--panel-3); }\n@keyframes pulso { 0% { box-shadow: 0 0 0 0 rgba(62, 213, 152, .55); } 100% { box-shadow: 0 0 0 9px rgba(62, 213, 152, 0); } }\n.clock { display: flex; flex-direction: column; align-items: flex-end; }\n.clock b { font-size: 22px; font-weight: 700; letter-spacing: .02em; }\n.clock span { font-size: 12px; color: var(--muted); font-weight: 500; }\n.btn { height: 40px; padding: 0 14px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--panel-2); font-weight: 600; font-size: 13px; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; }\n.btn:hover { border-color: var(--accent); }\n.btn:focus-visible, .card:focus-visible, .chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }\n.progreso { height: 2px; background: transparent; }\n.progreso i { display: block; height: 100%; width: 0; background: var(--accent); transition: width 1s linear; }\n\n.aviso { margin-top: 18px; padding: 12px 16px; border-radius: 12px; font-weight: 500; font-size: 13px; border: 1px solid; }\n.aviso.error { color: var(--late); background: var(--late-bg); border-color: rgba(255, 122, 122, .35); }\n.aviso.info { color: var(--warn); background: var(--warn-bg); border-color: rgba(247, 192, 74, .35); }\n\n.titulo { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 28px 0 12px; }\n.titulo h2 { margin: 0; font-size: 13px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }\n.titulo span { font-size: 12px; color: var(--muted); }\n\n/* KPI */\n.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-top: 24px; }\n.kpi { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }\n.kpi .l { font-size: 12px; font-weight: 600; color: var(--muted); }\n.kpi .v { font-size: clamp(24px, 2.1vw, 34px); font-weight: 800; letter-spacing: -.03em; line-height: 1.15; white-space: nowrap; }\n.kpi .n { font-size: 12px; color: var(--muted); font-weight: 500; }\n.kpi.destacado { background: linear-gradient(160deg, #161E31, var(--panel)); border-color: #2B3756; }\n\n/* Agentes */\n.agentes { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }\n.card { text-align: left; cursor: pointer; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; display: flex; flex-direction: column; gap: 16px; min-width: 0; transition: border-color .15s, transform .15s; }\n.card:hover { border-color: var(--line-2); transform: translateY(-1px); }\n.card.activa { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }\n.card.sin-vincular { opacity: .6; cursor: default; }\n.cab { display: flex; align-items: center; gap: 12px; }\n.avatar { width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 14px; background: var(--panel-3); border: 1px solid var(--line-2); flex: none; }\n.cab .nom { font-weight: 700; font-size: 15px; display: block; }\n.estado { display: inline-flex; align-items: center; gap: 6px; margin-top: 4px; padding: 3px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 700; }\n.estado::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }\n.t-ok { color: var(--ok); background: var(--ok-bg); }\n.t-warn { color: var(--warn); background: var(--warn-bg); }\n.t-late { color: var(--late); background: var(--late-bg); }\n.t-neutro { color: var(--muted); background: var(--panel-3); }\n.duo { display: grid; grid-template-columns: 1fr 1.25fr; gap: 10px; }\n.caja { border-radius: 12px; padding: 11px 13px; background: var(--panel-2); display: flex; flex-direction: column; gap: 2px; min-width: 0; }\n.caja .l { font-size: 11.5px; font-weight: 600; color: var(--muted); }\n.caja .v { font-size: 30px; font-weight: 800; letter-spacing: -.03em; line-height: 1.15; }\n.caja .r { font-size: 20px; font-weight: 700; padding-top: 6px; white-space: nowrap; }\n.caja.t-ok, .caja.t-warn, .caja.t-late { background: none; }\n.caja.t-ok { background: var(--ok-bg); } .caja.t-warn { background: var(--warn-bg); } .caja.t-late { background: var(--late-bg); }\n.caja.t-ok .l, .caja.t-warn .l, .caja.t-late .l { color: var(--muted); }\n.metricas { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px 8px; }\n.metricas div { display: flex; flex-direction: column; min-width: 0; }\n.metricas .l { font-size: 11px; color: var(--muted); font-weight: 600; }\n.metricas .v { font-size: 17px; font-weight: 700; }\n.pie { font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 12px; font-weight: 500; }\n.pie b { color: var(--ink); font-weight: 700; }\n\n/* Tabla + feed */\n.doble { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; margin-top: 28px; }\n.bloque { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; min-width: 0; }\n.bloque.tabla { flex: 999 1 680px; }\n.bloque.feed { flex: 1 1 340px; }\n.bloque h3 { margin: 0; font-size: 15px; font-weight: 700; }\n.bloque .sub { font-size: 12px; color: var(--muted); font-weight: 500; }\n.bloque-cab { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }\n.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }\n.chip { height: 34px; padding: 0 13px; border-radius: 999px; border: 1px solid var(--line-2); background: var(--panel-2); font-size: 12.5px; font-weight: 600; cursor: pointer; }\n.chip:hover { border-color: var(--accent); }\n.chip.activa { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }\n.scroll { overflow-x: auto; }\ntable { width: 100%; border-collapse: collapse; min-width: 720px; }\nth { text-align: left; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 0 12px 10px; border-bottom: 1px solid var(--line); }\ntd { padding: 11px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }\ntr:last-child td { border-bottom: 0; }\ntbody tr:hover td { background: var(--panel-2); }\n.reloj-t { display: inline-block; min-width: 104px; padding: 5px 9px; border-radius: 8px; font-weight: 700; font-size: 13px; text-align: center; white-space: nowrap; }\n.num { font-weight: 700; }\n.num a { display: inline-flex; align-items: center; gap: 4px; }\n.asunto { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n.tenue { color: var(--muted); }\n.vacio { padding: 26px 12px; text-align: center; color: var(--muted); font-weight: 500; }\n.feed ol { list-style: none; margin: 0; padding: 0; max-height: 640px; overflow-y: auto; }\n.feed li { display: flex; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }\n.feed li:last-child { border-bottom: 0; }\n.feed .ic { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; flex: none; }\n.feed .tx { font-size: 13px; font-weight: 500; }\n.feed .hr { font-size: 11.5px; color: var(--muted); }\nfooter { margin-top: 28px; font-size: 12px; color: var(--muted); display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }\n.esqueleto { color: var(--muted); padding: 60px 0; text-align: center; font-weight: 500; }\n\n@media (max-width: 640px) {\n  .wrap, .top-in { padding-left: 16px; padding-right: 16px; }\n  .clock { align-items: flex-start; }\n  .kpi .v { font-size: 28px; }\n}\n</style>\n</head>\n<body>\n<div class=\"top\">\n  <div class=\"top-in\">\n    <div class=\"brand\">\n      <div class=\"mark\" aria-hidden=\"true\">\n        <svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#B9C6FF\" stroke-width=\"2.2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M3 12h4l3-8 4 16 3-8h4\"/></svg>\n      </div>\n      <div>\n        <h1>Centro de control · Soporte</h1>\n        <p>Help Scout en tiempo real</p>\n      </div>\n    </div>\n    <span id=\"estadoConexion\" class=\"pill cargando\"><span class=\"dot\"></span><span>Conectando</span></span>\n    <div class=\"clock\"><b id=\"reloj\">--:--:--</b><span id=\"actualizado\">Cargando datos…</span></div>\n    <button type=\"button\" class=\"btn\" id=\"btnPausa\" aria-pressed=\"false\">\n      <svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.4\" stroke-linecap=\"round\" aria-hidden=\"true\"><path d=\"M8 5v14M16 5v14\"/></svg>\n      <span>Pausar</span>\n    </button>\n    <button type=\"button\" class=\"btn\" id=\"btnPantalla\" hidden>\n      <svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5\"/></svg>\n      <span>Pantalla completa</span>\n    </button>\n  </div>\n  <div class=\"progreso\"><i id=\"barra\"></i></div>\n</div>\n\n<main class=\"wrap\">\n  <div id=\"avisos\"></div>\n  <div id=\"contenido\"><div class=\"esqueleto\">Leyendo Help Scout… la primera carga puede tardar unos segundos.</div></div>\n</main>\n\n<script>\n(function () {\n  'use strict';\n  var datos = null;          // última respuesta del servidor\n  var desfase = 0;           // reloj del servidor − reloj del navegador\n  var filtro = 'todos';\n  var pausado = false;\n  var enCurso = false;\n  var ultimaOk = 0;\n  var proxima = 0;\n  var temporizador = null;\n  var demo = typeof google === 'undefined' || !google.script || !google.script.run;\n\n  var $ = function (id) { return document.getElementById(id); };\n  var ahora = function () { return Date.now() + desfase; };\n  var esc = function (t) {\n    return String(t == null ? '' : t).replace(/[&<>\"']/g, function (c) {\n      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' }[c];\n    });\n  };\n  var p2 = function (n) { return (n < 10 ? '0' : '') + n; };\n  function dur(seg) {\n    seg = Math.max(0, Math.floor(seg));\n    var d = Math.floor(seg / 86400), h = Math.floor(seg % 86400 / 3600), m = Math.floor(seg % 3600 / 60), s = seg % 60;\n    if (d) return d + 'd ' + p2(h) + 'h ' + p2(m) + 'm';\n    if (h) return h + 'h ' + p2(m) + 'm ' + p2(s) + 's';\n    return p2(m) + 'm ' + p2(s) + 's';\n  }\n  function minTxt(m) {\n    if (m == null) return '—';\n    if (m < 60) return Math.round(m) + ' min';\n    return Math.floor(m / 60) + ' h ' + p2(Math.round(m % 60)) + ' min';\n  }\n  function hora(ms, conSegundos) {\n    var o = { hour: '2-digit', minute: '2-digit', hour12: false };\n    if (conSegundos) o.second = '2-digit';\n    try { o.timeZone = (datos && datos.tz) || 'America/New_York'; return new Date(ms).toLocaleTimeString('es', o); }\n    catch (e) { return new Date(ms).toTimeString().slice(0, conSegundos ? 8 : 5); }\n  }\n  function iniciales(n) {\n    return String(n).split(/\\s+/).filter(Boolean).slice(0, 2).map(function (x) { return x[0]; }).join('').toUpperCase();\n  }\n  function tonoEspera(min) {\n    var meta = (datos && datos.metaRespuestaMin) || 60;\n    return min < meta / 2 ? 't-ok' : min < meta ? 't-warn' : 't-late';\n  }\n\n  // ---------- Datos ----------\n  function pedir() {\n    if (enCurso || pausado) return;\n    enCurso = true;\n    if (!datos) pintarConexion('cargando', 'Conectando');\n    var listo = function (texto) { enCurso = false; recibir(texto); programar(); };\n    var falla = function (err) { enCurso = false; recibir(JSON.stringify({ ok: false, error: String(err && err.message || err) })); programar(); };\n    if (demo) { setTimeout(function () { listo(JSON.stringify(datosDemo())); }, 300); return; }\n    google.script.run.withSuccessHandler(listo).withFailureHandler(falla).datosPanelEnVivo();\n  }\n  function intervalo() {\n    if (!datos) return 10;\n    return datos.enHorario ? (datos.segundos || 5) : (datos.segundosFueraDeHorario || 60);\n  }\n  function programar() {\n    clearTimeout(temporizador);\n    if (pausado) return;\n    var s = datos && datos.ok === false ? 15 : intervalo();\n    proxima = Date.now() + s * 1000;\n    temporizador = setTimeout(pedir, s * 1000);\n  }\n  function recibir(texto) {\n    var r;\n    try { r = JSON.parse(texto); } catch (e) { r = { ok: false, error: 'Respuesta no válida del servidor.' }; }\n    if (!r.ok) {\n      $('avisos').innerHTML = '<div class=\"aviso error\" role=\"alert\">No se pudo leer Help Scout: ' + esc(r.error) +\n        (datos ? ' · Se muestran los últimos datos recibidos.' : '') + ' Reintentando…</div>';\n      pintarConexion('error', 'Sin conexión');\n      if (!datos) $('contenido').innerHTML = '<div class=\"esqueleto\">Sin datos todavía.</div>';\n      return;\n    }\n    desfase = Date.parse(r.ahora) - Date.now();\n    datos = r;\n    ultimaOk = Date.now();\n    var avisos = '';\n    if (r.sinVincular && r.sinVincular.length) {\n      avisos += '<div class=\"aviso info\">No encontré en Help Scout a: ' + esc(r.sinVincular.join(', ')) +\n        '. Revisa su email en CONFIG.AGENTES.</div>';\n    }\n    if (demo) avisos += '<div class=\"aviso info\">Vista de demostración con datos de ejemplo (fuera de Apps Script).</div>';\n    $('avisos').innerHTML = avisos;\n    pintar();\n  }\n\n  // ---------- Pintado ----------\n  function pintarConexion(clase, texto) {\n    var el = $('estadoConexion');\n    el.className = 'pill ' + clase;\n    el.lastElementChild.textContent = texto;\n  }\n\n  function pintar() {\n    var p = datos.panel, e = p.equipo;\n    var viejo = null;\n    p.agentes.forEach(function (a) { a.esperando.forEach(function (t) { if (!viejo || t.esperaDesde < viejo) viejo = t.esperaDesde; }); });\n    var html = '';\n    html += '<section class=\"kpis\" aria-label=\"Totales del equipo\">' +\n      kpi('Clientes esperando respuesta', '<span>' + e.esperando + '</span>', 'casos asignados · ' + e.seguimiento + ' en seguimiento', true) +\n      kpi('El que más lleva esperando', viejo ? '<span class=\"reloj\" data-desde=\"' + esc(viejo) + '\" data-color=\"1\">' + dur((ahora() - Date.parse(viejo)) / 1000) + '</span>' : '—', 'corre en vivo, segundo a segundo') +\n      kpi('Respuestas hoy', e.respuestas, e.casosRespondidos + ' casos respondidos') +\n      kpi('Cerrados hoy', e.cerrados, e.asignados + ' asignados · ' + e.reasignados + ' re-asignados') +\n      kpi('Tiempo prom. de respuesta', minTxt(e.promedioRespuestaMin), 'mediana ' + minTxt(e.medianaRespuestaMin) + ' · horario laboral') +\n      kpi('Sin asignar', p.sinAsignar.length, p.sinAsignar.length ? 'esperando que alguien los tome' : 'cola vacía') +\n      '</section>';\n\n    html += '<div class=\"titulo\"><h2>Agentes</h2><span>Toca una tarjeta para ver solo sus tickets</span></div>';\n    html += '<section class=\"agentes\" aria-label=\"Agentes\">' + p.agentes.map(tarjeta).join('') + '</section>';\n\n    html += '<div class=\"doble\">' +\n      '<section class=\"bloque tabla\" aria-label=\"Tickets esperando respuesta\"><div id=\"tabla\"></div></section>' +\n      '<section class=\"bloque feed\" aria-label=\"Actividad\"><div class=\"bloque-cab\"><h3>Lo que va pasando</h3><span class=\"sub\">Hoy · ' + esc(diaBonito(datos.hoy)) + '</span></div>' +\n      feed(p.feed) + '</section></div>';\n\n    html += '<footer><span>Fuente: Help Scout · horario ' + datos.horario.inicio + ':00–' + datos.horario.fin + ':00 · meta de respuesta ' + datos.metaRespuestaMin + ' min</span>' +\n      '<span>Recarga completa a las ' + esc(hora(Date.parse(datos.ultimaRecargaCompleta), false)) + '</span></footer>';\n\n    $('contenido').innerHTML = html;\n    Array.prototype.forEach.call(document.querySelectorAll('.card[data-id]'), function (b) {\n      b.addEventListener('click', function () {\n        var id = b.getAttribute('data-id');\n        filtro = filtro === id ? 'todos' : id;\n        pintarTabla();\n        marcarTarjetas();\n      });\n    });\n    marcarTarjetas();\n    pintarTabla();\n    tic();\n  }\n\n  function kpi(l, v, n, destacado) {\n    return '<div class=\"kpi' + (destacado ? ' destacado' : '') + '\"><span class=\"l\">' + esc(l) + '</span><span class=\"v\">' + v + '</span><span class=\"n\">' + esc(n) + '</span></div>';\n  }\n\n  function tarjeta(a) {\n    if (!a.vinculado || !a.hoy) {\n      return '<div class=\"card sin-vincular\"><div class=\"cab\"><span class=\"avatar\">' + esc(iniciales(a.nombre)) + '</span><span><span class=\"nom\">' + esc(a.nombre) +\n        '</span><span class=\"estado t-neutro\">No vinculada en Help Scout</span></span></div></div>';\n    }\n    var h = a.hoy;\n    var viejo = a.esperando.length ? a.esperando[0].esperaDesde : null;\n    return '<button type=\"button\" class=\"card\" data-id=\"' + a.id + '\" aria-pressed=\"false\">' +\n      '<span class=\"cab\"><span class=\"avatar\">' + esc(iniciales(a.nombre)) + '</span><span><span class=\"nom\">' + esc(a.nombre) + '</span>' +\n      '<span class=\"estado t-neutro\" data-ultima=\"' + esc(h.ultimaRespuesta || '') + '\" data-esperando=\"' + a.esperando.length + '\">—</span></span></span>' +\n      '<span class=\"duo\">' +\n        '<span class=\"caja\"><span class=\"l\">Esperando respuesta</span><span class=\"v\">' + a.esperando.length + '</span></span>' +\n        (viejo\n          ? '<span class=\"caja reloj-caja\" data-desde=\"' + esc(viejo) + '\"><span class=\"l\">El que más espera</span><span class=\"r reloj\" data-desde=\"' + esc(viejo) + '\">' + dur((ahora() - Date.parse(viejo)) / 1000) + '</span></span>'\n          : '<span class=\"caja t-ok\"><span class=\"l\">El que más espera</span><span class=\"r\">Al día</span></span>') +\n      '</span>' +\n      '<span class=\"metricas\">' +\n        m('Asignados hoy', h.asignados) + m('Respuestas', h.respuestas) + m('Cerrados', h.cerrados) +\n        m('En seguimiento', a.seguimiento) + m('Prom. respuesta', minTxt(h.promedioRespuestaMin)) + m('Prom. 1ª resp.', minTxt(h.promedioPrimeraMin)) +\n      '</span>' +\n      '<span class=\"pie\">' + (h.ultimaRespuesta\n        ? 'Última respuesta hace <b class=\"reloj\" data-desde=\"' + esc(h.ultimaRespuesta) + '\">' + dur((ahora() - Date.parse(h.ultimaRespuesta)) / 1000) + '</b> · ' + h.reasignados + ' re-asignados'\n        : 'Todavía no responde hoy · ' + h.reasignados + ' re-asignados') + '</span>' +\n      '</button>';\n  }\n  function m(l, v) { return '<div><span class=\"l\">' + esc(l) + '</span><span class=\"v\">' + esc(v) + '</span></div>'; }\n\n  function marcarTarjetas() {\n    Array.prototype.forEach.call(document.querySelectorAll('.card[data-id]'), function (b) {\n      var activa = b.getAttribute('data-id') === String(filtro);\n      b.classList.toggle('activa', activa);\n      b.setAttribute('aria-pressed', activa ? 'true' : 'false');\n    });\n  }\n\n  function pintarTabla() {\n    var p = datos.panel;\n    var filas = [];\n    p.agentes.forEach(function (a) { a.esperando.forEach(function (t) { filas.push(t); }); });\n    p.sinAsignar.forEach(function (t) { filas.push(t); });\n    var cuenta = function (f) { return filas.filter(f).length; };\n    var chips = [{ id: 'todos', t: 'Todos', n: filas.length }]\n      .concat(p.agentes.filter(function (a) { return a.vinculado; }).map(function (a) {\n        return { id: String(a.id), t: a.nombre.split(' ')[0], n: a.esperando.length };\n      }))\n      .concat([{ id: 'sin', t: 'Sin asignar', n: p.sinAsignar.length }]);\n    var visibles = filas.filter(function (t) {\n      return filtro === 'todos' || (filtro === 'sin' ? !t.agenteId : String(t.agenteId) === String(filtro));\n    }).sort(function (x, y) { return x.esperaDesde < y.esperaDesde ? -1 : 1; });\n    var titulo = filtro === 'todos' ? 'todo el equipo' : filtro === 'sin' ? 'sin asignar'\n      : (p.agentes.filter(function (a) { return String(a.id) === String(filtro); })[0] || {}).nombre;\n\n    var html = '<div class=\"bloque-cab\"><h3>Clientes esperando respuesta · ' + esc(titulo) + '</h3>' +\n      '<span class=\"sub\">Del que más espera al más reciente · meta ' + datos.metaRespuestaMin + ' min</span></div>';\n    html += '<div class=\"chips\" role=\"group\" aria-label=\"Filtrar por agente\">' + chips.map(function (c) {\n      var activa = String(filtro) === c.id;\n      return '<button type=\"button\" class=\"chip' + (activa ? ' activa' : '') + '\" data-f=\"' + c.id + '\" aria-pressed=\"' + activa + '\">' + esc(c.t) + ' · ' + c.n + '</button>';\n    }).join('') + '</div>';\n    if (!visibles.length) {\n      html += '<div class=\"vacio\">Nadie está esperando respuesta aquí.</div>';\n    } else {\n      html += '<div class=\"scroll\"><table><thead><tr><th>Esperando</th><th>Ticket</th><th>Asunto</th><th>Cliente</th><th>Agente</th><th>Estado</th></tr></thead><tbody>' +\n        visibles.map(function (t) {\n          return '<tr><td><span class=\"reloj-t reloj\" data-desde=\"' + esc(t.esperaDesde) + '\" data-color=\"1\">' + dur((ahora() - Date.parse(t.esperaDesde)) / 1000) + '</span></td>' +\n            '<td class=\"num\"><a href=\"' + esc(t.url) + '\" target=\"_blank\" rel=\"noopener\">#' + esc(t.numero) +\n            ' <svg width=\"11\" height=\"11\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M7 17 17 7M8 7h9v9\"/></svg></a></td>' +\n            '<td class=\"asunto\" title=\"' + esc(t.asunto) + '\">' + esc(t.asunto) + '</td>' +\n            '<td class=\"tenue\">' + esc(t.cliente || '—') + '</td>' +\n            '<td>' + (t.agenteId ? esc(t.agente) : '<span class=\"estado t-late\">Sin asignar</span>') + '</td>' +\n            '<td class=\"tenue\">' + (t.estado === 'pending' ? 'Pending · el cliente respondió' : 'Activo') + (t.buzon ? ' · ' + esc(t.buzon) : '') + '</td></tr>';\n        }).join('') + '</tbody></table></div>';\n    }\n    $('tabla').innerHTML = html;\n    Array.prototype.forEach.call(document.querySelectorAll('.chip'), function (b) {\n      b.addEventListener('click', function () { filtro = b.getAttribute('data-f'); pintarTabla(); marcarTarjetas(); });\n    });\n    tic();\n  }\n\n  var ICONOS = {\n    RESPUESTA: ['var(--ok)', 'var(--ok-bg)', '<path d=\"M9 14 4 9l5-5\"/><path d=\"M4 9h10a6 6 0 0 1 6 6v5\"/>'],\n    CLIENTE: ['var(--warn)', 'var(--warn-bg)', '<path d=\"M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z\"/>'],\n    ASIGNADO: ['var(--accent)', 'rgba(124,147,255,.14)', '<circle cx=\"12\" cy=\"8\" r=\"4\"/><path d=\"M4 21a8 8 0 0 1 16 0\"/>'],\n    CERRADO: ['var(--ok)', 'var(--ok-bg)', '<path d=\"M20 6 9 17l-5-5\"/>'],\n    REASIGNADO: ['var(--muted)', 'var(--panel-3)', '<path d=\"M17 1l4 4-4 4\"/><path d=\"M3 11V9a4 4 0 0 1 4-4h14\"/><path d=\"M7 23l-4-4 4-4\"/><path d=\"M21 13v2a4 4 0 0 1-4 4H3\"/>'],\n    NUEVA_CONSULTA: ['var(--warn)', 'var(--warn-bg)', '<path d=\"M12 5v14M5 12h14\"/>'],\n  };\n  function feed(items) {\n    if (!items.length) return '<div class=\"vacio\">Todavía no hay movimientos hoy.</div>';\n    return '<ol>' + items.map(function (f) {\n      var ic = ICONOS[f.tipo] || ICONOS.REASIGNADO;\n      return '<li><span class=\"ic\" style=\"color:' + ic[0] + ';background:' + ic[1] + '\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\">' + ic[2] + '</svg></span>' +\n        '<span><a class=\"tx\" href=\"' + esc(f.url) + '\" target=\"_blank\" rel=\"noopener\">' + esc(f.texto) + '</a><br>' +\n        '<span class=\"hr\">' + esc(hora(Date.parse(f.fecha), false)) + ' · hace <span class=\"reloj\" data-desde=\"' + esc(f.fecha) + '\" data-corto=\"1\">' + corto((ahora() - Date.parse(f.fecha)) / 1000) + '</span></span></span></li>';\n    }).join('') + '</ol>';\n  }\n  function corto(seg) {\n    seg = Math.max(0, Math.floor(seg));\n    if (seg < 60) return seg + ' s';\n    if (seg < 3600) return Math.floor(seg / 60) + ' min';\n    return Math.floor(seg / 3600) + ' h ' + p2(Math.floor(seg % 3600 / 60)) + ' min';\n  }\n  function diaBonito(d) {\n    var f = new Date(d + 'T12:00:00Z');\n    try { return f.toLocaleDateString('es', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' }); } catch (e) { return d; }\n  }\n\n  // ---------- Cada segundo ----------\n  function tic() {\n    var t = ahora();\n    $('reloj').textContent = hora(t, true);\n    if (!datos || !datos.ok) return;\n    var hace = Math.max(0, Math.floor((Date.now() - ultimaOk) / 1000));\n    $('actualizado').textContent = pausado ? 'En pausa · datos de hace ' + corto(hace)\n      : 'Actualizado hace ' + hace + ' s · ' + (datos.enHorario ? 'cada ' + datos.segundos + ' s' : 'fuera de horario, cada ' + datos.segundosFueraDeHorario + ' s');\n    if (!pausado && !enCurso) pintarConexion(datos.enHorario ? 'vivo' : 'fuera', datos.enHorario ? 'En vivo' : 'Fuera de horario');\n    if (pausado) pintarConexion('pausa', 'En pausa');\n    var total = intervalo() * 1000;\n    $('barra').style.width = pausado ? '0' : Math.min(100, Math.max(0, 100 - (proxima - Date.now()) / total * 100)) + '%';\n\n    Array.prototype.forEach.call(document.querySelectorAll('.reloj[data-desde]'), function (el) {\n      var seg = (t - Date.parse(el.getAttribute('data-desde'))) / 1000;\n      el.textContent = el.getAttribute('data-corto') ? corto(seg) : dur(seg);\n      if (el.getAttribute('data-color')) {\n        el.classList.remove('t-ok', 't-warn', 't-late');\n        el.classList.add(tonoEspera(seg / 60));\n        if (!el.classList.contains('reloj-t')) el.style.background = 'none';\n      }\n    });\n    Array.prototype.forEach.call(document.querySelectorAll('.reloj-caja'), function (el) {\n      var min = (t - Date.parse(el.getAttribute('data-desde'))) / 60000;\n      el.classList.remove('t-ok', 't-warn', 't-late');\n      el.classList.add(tonoEspera(min));\n      var r = el.querySelector('.r');\n      r.style.color = min < datos.metaRespuestaMin / 2 ? 'var(--ok)' : min < datos.metaRespuestaMin ? 'var(--warn)' : 'var(--late)';\n    });\n    var alerta = datos.alertaSinResponderMin || [10, 30];\n    Array.prototype.forEach.call(document.querySelectorAll('.estado[data-esperando]'), function (el) {\n      var esperando = Number(el.getAttribute('data-esperando'));\n      var ultima = el.getAttribute('data-ultima');\n      var min = ultima ? (t - Date.parse(ultima)) / 60000 : Infinity;\n      var clase, texto;\n      if (!esperando) { clase = 't-ok'; texto = 'Al día'; }\n      else if (!datos.enHorario) { clase = 't-neutro'; texto = 'Fuera de horario'; }\n      else if (min < alerta[0]) { clase = 't-ok'; texto = 'Respondiendo'; }\n      else if (min < alerta[1]) { clase = 't-warn'; texto = 'Sin responder hace ' + Math.floor(min) + ' min'; }\n      else { clase = 't-late'; texto = ultima ? 'Sin responder hace ' + corto(min * 60) : 'Sin responder hoy'; }\n      el.className = 'estado ' + clase;\n      el.textContent = texto;\n    });\n  }\n\n  // ---------- Controles ----------\n  $('btnPausa').addEventListener('click', function () {\n    pausado = !pausado;\n    this.setAttribute('aria-pressed', pausado ? 'true' : 'false');\n    this.lastElementChild.textContent = pausado ? 'Reanudar' : 'Pausar';\n    if (pausado) clearTimeout(temporizador); else pedir();\n    tic();\n  });\n  if (document.fullscreenEnabled) {\n    $('btnPantalla').hidden = false;\n    $('btnPantalla').addEventListener('click', function () {\n      if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen();\n    });\n  }\n  document.addEventListener('visibilitychange', function () {\n    if (!document.hidden && !pausado && Date.now() - ultimaOk > intervalo() * 1000) pedir();\n  });\n\n  // ---------- Demo (solo al abrir el archivo fuera de Apps Script) ----------\n  function datosDemo() {\n    var n = Date.now();\n    var hace = function (min) { return new Date(n - min * 60000).toISOString(); };\n    var t = function (num, min, asunto, cliente, agenteId, agente, estado) {\n      return { id: num, numero: num, asunto: asunto, cliente: cliente, estado: estado || 'active', esperaDesde: hace(min), agenteId: agenteId, agente: agente, buzon: 'Soporte', url: '#' };\n    };\n    var ag = function (id, nombre, esp, seg, hoy) { return { id: id, nombre: nombre, vinculado: true, esperando: esp, seguimiento: seg, abiertos: esp.length + seg, hoy: hoy }; };\n    var hoy = function (r, c, a, re, pr, p1, ult) { return { respuestas: r, casosRespondidos: Math.round(r * .7), asignados: a, cerrados: c, reasignados: re, nuevasConsultas: 2, promedioRespuestaMin: pr, medianaRespuestaMin: pr - 2, promedioPrimeraMin: p1, ultimaRespuesta: ult }; };\n    return {\n      ok: true, ahora: new Date(n).toISOString(), hoy: new Date(n).toISOString().slice(0, 10), tz: 'America/New_York', enHorario: true,\n      horario: { inicio: 9, fin: 17 }, segundos: 5, segundosFueraDeHorario: 60, metaRespuestaMin: 60, alertaSinResponderMin: [10, 30],\n      ultimaRecargaCompleta: hace(4), sinVincular: [],\n      panel: {\n        agentes: [\n          ag(1, 'Jaideth Andocilla', [t(4518, 41, 'Quiero cambiar la fecha de mi entrada', 'Carlos Pérez', 1, 'Jaideth Andocilla'), t(4512, 12, 'No me llegó el acceso al evento', 'Laura Gómez', 1, 'Jaideth Andocilla')], 2, hoy(38, 17, 21, 2, 12, 9, hace(2))),\n          ag(2, 'Maryelin Rios', [t(4498, 96, 'Cobro duplicado en mi tarjeta', 'José Martínez', 2, 'Maryelin Rios'), t(4509, 67, 'Solicitud de reembolso', 'Ana Lucía Torres', 2, 'Maryelin Rios', 'pending'), t(4520, 38, 'No puedo iniciar sesión', 'Diego Herrera', 2, 'Maryelin Rios')], 1, hoy(19, 8, 18, 1, 43, 31, hace(34))),\n          ag(3, 'Edna Escudero', [t(4532, 18, 'El código QR no funciona', 'Valentina Castro', 3, 'Edna Escudero')], 3, hoy(44, 22, 23, 3, 8, 6, hace(1))),\n          ag(4, 'Andrés Rodríguez', [t(4503, 54, 'Necesito la factura de mi compra', 'Luis Ramírez', 4, 'Andrés Rodríguez'), t(4524, 27, '¿Puedo transferir mi entrada?', 'Camila Ortiz', 4, 'Andrés Rodríguez')], 1, hoy(27, 11, 16, 4, 22, 15, hace(13))),\n        ],\n        sinAsignar: [t(4540, 7, 'Ubicación del evento', 'Andrea Molina', null, ''), t(4542, 1, 'Error al pagar con PayPal', 'Felipe Rojas', null, '')],\n        equipo: { esperando: 8, seguimiento: 7, respuestas: 128, casosRespondidos: 90, asignados: 78, cerrados: 58, reasignados: 10, nuevasConsultas: 8, promedioRespuestaMin: 18.4, medianaRespuestaMin: 12, promedioPrimeraMin: 14 },\n        feed: [\n          { fecha: hace(0.3), tipo: 'RESPUESTA', texto: 'Edna Escudero respondió el #4521', url: '#' },\n          { fecha: hace(1), tipo: 'CLIENTE', texto: 'El cliente escribió en el #4542 · sin asignar', url: '#' },\n          { fecha: hace(2), tipo: 'RESPUESTA', texto: 'Jaideth Andocilla respondió el #4531', url: '#' },\n          { fecha: hace(5), tipo: 'CERRADO', texto: 'Edna Escudero cerró el #4517', url: '#' },\n          { fecha: hace(9), tipo: 'ASIGNADO', texto: 'Andrés Rodríguez tomó el #4530', url: '#' },\n          { fecha: hace(13), tipo: 'REASIGNADO', texto: 'Andrés Rodríguez re-asignó el #4511', url: '#' },\n          { fecha: hace(20), tipo: 'NUEVA_CONSULTA', texto: 'Nueva consulta en el #4470 (Maryelin Rios)', url: '#' },\n        ],\n      },\n    };\n  }\n\n  setInterval(tic, 1000);\n  tic();\n  pedir();\n})();\n</script>\n</body>\n</html>\n";
+const PANEL_HTML = "<!DOCTYPE html>\n<html lang=\"es\">\n<head>\n<base target=\"_top\">\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>Soporte · Control en vivo</title>\n<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>\n<link href=\"https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap\" rel=\"stylesheet\">\n<style>\n:root {\n  --bg: #0B0B0C;\n  --surface: #111113;\n  --raised: #18181B;\n  --line: #232327;\n  --line-2: #33333A;\n  --text: #F2F2F3;\n  --text-2: #A6A6AE;\n  --text-3: #85858E;\n  --ok: #5BC79A;\n  --warn: #E2B340;\n  --bad: #F2716B;\n  --r: 6px;\n}\n* { box-sizing: border-box; }\nhtml, body { margin: 0; background: var(--bg); color: var(--text); }\nbody {\n  font-family: 'Montserrat', 'Helvetica Neue', Arial, sans-serif; font-size: 13px; line-height: 1.45; font-weight: 500;\n  font-feature-settings: 'tnum' 1, 'lnum' 1; -webkit-font-smoothing: antialiased;\n}\na { color: inherit; text-decoration: none; }\na:hover { text-decoration: underline; text-underline-offset: 3px; }\nbutton, input, select { font: inherit; color: inherit; }\n:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }\n.pagina { max-width: 1680px; margin: 0 auto; padding: 0 28px 48px; }\n.num { text-align: right; white-space: nowrap; }\n.ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); } .tenue { color: var(--text-2); }\n\n/* Cabecera */\n.cab { position: sticky; top: 0; z-index: 5; background: var(--bg); border-bottom: 1px solid var(--line); }\n.cab-in { max-width: 1680px; margin: 0 auto; padding: 0 28px; min-height: 60px; display: flex; align-items: center; gap: 12px 24px; flex-wrap: wrap; }\n.marca { display: flex; align-items: baseline; gap: 12px; margin-right: auto; padding: 14px 0; }\n.marca b { font-size: 15px; font-weight: 700; letter-spacing: .01em; }\n.marca span { font-size: 13px; color: var(--text-2); padding-left: 12px; border-left: 1px solid var(--line-2); }\n.estado-con { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }\n.estado-con i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }\n.hora { text-align: right; line-height: 1.25; }\n.hora b { display: block; font-size: 17px; font-weight: 600; letter-spacing: .02em; }\n.hora span { font-size: 11.5px; color: var(--text-2); }\n.btn { height: 36px; padding: 0 14px; border-radius: var(--r); border: 1px solid var(--line-2); background: transparent; font-weight: 600; font-size: 12.5px; cursor: pointer; white-space: nowrap; }\n.btn:hover { background: var(--raised); }\n.btn.principal { background: var(--text); color: var(--bg); border-color: var(--text); }\n.btn.principal:hover { background: #D9D9DC; }\n.btn:disabled { opacity: .5; cursor: default; }\n.btn.chico { height: 28px; padding: 0 10px; font-size: 11.5px; }\n.avance { height: 1px; }\n.avance i { display: block; height: 1px; width: 0; background: var(--text-3); transition: width 1s linear; }\n\n.aviso { margin-top: 16px; padding: 10px 14px; border-radius: var(--r); font-size: 12.5px; border: 1px solid var(--line-2); border-left: 3px solid var(--warn); background: var(--surface); }\n.aviso.error { border-left-color: var(--bad); }\n\n.seccion { margin-top: 32px; }\n.seccion-cab { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }\n.seccion-cab h2 { margin: 0; font-size: 11.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }\n.seccion-cab p { margin: 0; font-size: 12px; color: var(--text-2); }\n\n/* Indicadores */\n.indicadores { margin-top: 24px; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); }\n.ind { padding: 16px 18px 15px; border-left: 1px solid var(--line); min-width: 0; }\n.ind:first-child { border-left: 0; }\n.ind .l { font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--text-2); }\n.ind .v { font-size: clamp(22px, 1.9vw, 30px); font-weight: 600; letter-spacing: -.02em; line-height: 1.25; margin-top: 6px; white-space: nowrap; }\n.ind .n { font-size: 12px; color: var(--text-2); margin-top: 2px; }\n@media (max-width: 1100px) { .indicadores { grid-template-columns: repeat(3, minmax(0, 1fr)); } .ind:nth-child(4) { border-left: 0; } .ind:nth-child(n+4) { border-top: 1px solid var(--line); } }\n@media (max-width: 620px) { .indicadores { grid-template-columns: repeat(2, minmax(0, 1fr)); } .ind { border-top: 1px solid var(--line); } .ind:nth-child(-n+2) { border-top: 0; } .ind:nth-child(odd) { border-left: 0; } .ind:nth-child(even) { border-left: 1px solid var(--line); } }\n\n/* Tablas */\n.caja { border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); overflow: hidden; }\n.desliza { overflow-x: auto; }\ntable { width: 100%; border-collapse: collapse; }\nth { font-size: 10.5px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--text-2); text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); white-space: nowrap; background: var(--surface); }\ntd { padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; }\ntbody tr:last-child td, tfoot td { border-bottom: 0; }\ntfoot td { border-top: 1px solid var(--line-2); font-weight: 600; background: var(--raised); }\nth.num { text-align: right; }\n.t-agentes { min-width: 1120px; }\n.t-agentes th, .t-agentes td { padding-left: 9px; padding-right: 9px; }\n.t-agentes th:first-child, .t-agentes td:first-child { padding-left: 16px; }\n.t-agentes tbody tr { cursor: pointer; }\n.t-agentes tbody tr:hover td { background: var(--raised); }\n.t-agentes tbody tr.sel td { background: var(--raised); }\n.t-agentes tbody tr.sel td:first-child { box-shadow: inset 2px 0 0 var(--text); }\n.t-agentes td.fuerte { font-size: 15px; font-weight: 600; }\n.nombre { font-weight: 600; font-size: 13.5px; white-space: nowrap; }\n.est { display: inline-flex; align-items: center; gap: 7px; font-size: 11.5px; font-weight: 600; white-space: nowrap; margin-top: 3px; }\n.est i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }\n.grupo-izq { border-left: 1px solid var(--line); }\n\n/* Pestañas */\n.pestanas { display: flex; gap: 22px; padding: 0 16px; border-bottom: 1px solid var(--line); overflow-x: auto; }\n.pest { background: none; border: 0; padding: 13px 0 12px; font-size: 12.5px; font-weight: 600; color: var(--text-2); cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; }\n.pest:hover { color: var(--text); }\n.pest.sel { color: var(--text); border-bottom-color: var(--text); }\n.pest span { color: var(--text-3); font-weight: 500; margin-left: 5px; }\n.t-cola { min-width: 760px; }\n.t-cola tbody tr:hover td { background: var(--raised); }\n.espera { font-weight: 600; font-size: 13px; white-space: nowrap; }\n.barra { display: block; width: 84px; height: 2px; background: var(--line-2); margin-top: 5px; }\n.barra i { display: block; height: 2px; background: currentColor; }\n.asunto { max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n.vacio { padding: 28px 16px; text-align: center; color: var(--text-2); }\n\n.dos { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; }\n.dos > .col-a { flex: 999 1 720px; min-width: 0; }\n.dos > .col-b { flex: 1 1 380px; min-width: 0; }\n\n/* Registro */\n.registro { list-style: none; margin: 0; padding: 0; max-height: 620px; overflow-y: auto; }\n.registro li { display: grid; grid-template-columns: 48px 96px minmax(0, 1fr); gap: 10px; padding: 9px 16px; border-bottom: 1px solid var(--line); align-items: baseline; }\n.registro li:last-child { border-bottom: 0; }\n.registro time { color: var(--text-2); font-size: 12px; }\n.registro .tipo { font-size: 10.5px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; }\n.registro .txt { min-width: 0; }\n.registro .txt small { display: block; color: var(--text-2); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n\n.pie { margin-top: 28px; padding-top: 14px; border-top: 1px solid var(--line); font-size: 11.5px; color: var(--text-2); display: flex; justify-content: space-between; gap: 8px 24px; flex-wrap: wrap; }\n.cargando { color: var(--text-2); padding: 80px 0; text-align: center; }\n\n/* Diálogos */\ndialog { border: 1px solid var(--line-2); border-radius: 8px; background: var(--surface); color: var(--text); padding: 0; width: min(1120px, calc(100vw - 32px)); max-height: calc(100vh - 32px); box-shadow: 0 24px 80px rgba(0, 0, 0, .6); }\ndialog::backdrop { background: rgba(0, 0, 0, .66); }\n.dlg-cab { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--surface); z-index: 1; }\n.dlg-cab h3 { margin: 0; font-size: 15px; font-weight: 700; }\n.dlg-cab p { margin: 2px 0 0; font-size: 12px; color: var(--text-2); }\n.dlg-cuerpo { padding: 20px; }\n.filtros { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 20px 28px; }\n.campo > label, .campo > .rot { display: block; font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--text-2); margin-bottom: 8px; }\n.campo input[type=date], .campo select { height: 36px; padding: 0 10px; border-radius: var(--r); border: 1px solid var(--line-2); background: var(--bg); color-scheme: dark; width: 100%; }\n.fechas { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }\n.fechas span { display: block; font-size: 11px; color: var(--text-2); margin-bottom: 3px; }\n.checks { display: flex; flex-direction: column; gap: 2px; }\n.checks label { display: flex; align-items: center; gap: 9px; min-height: 28px; font-size: 13px; cursor: pointer; }\n.checks input { width: 15px; height: 15px; accent-color: #F2F2F3; }\n.acciones { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line); }\n.acciones .nota { font-size: 12px; color: var(--text-2); margin-left: auto; }\n.previa { margin-top: 20px; }\n.previa h4 { margin: 0 0 8px; font-size: 11.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }\n.previa table { min-width: 980px; }\n.resumen-dlg { display: flex; gap: 28px; flex-wrap: wrap; margin-bottom: 18px; }\n.resumen-dlg div b { display: block; font-size: 20px; font-weight: 600; }\n.resumen-dlg div span { font-size: 11px; color: var(--text-2); text-transform: uppercase; letter-spacing: .07em; font-weight: 600; }\n\n@media (max-width: 640px) {\n  .pagina, .cab-in { padding-left: 16px; padding-right: 16px; }\n  .marca span { display: none; }\n  .hora { text-align: left; }\n  .registro li { grid-template-columns: 44px 92px minmax(0, 1fr); padding: 9px 12px; }\n}\n</style>\n</head>\n<body>\n<header class=\"cab\">\n  <div class=\"cab-in\">\n    <div class=\"marca\"><b>Soporte</b><span>Control en vivo · Help Scout</span></div>\n    <span id=\"conexion\" class=\"estado-con tenue\"><i></i><span>Conectando</span></span>\n    <div class=\"hora\"><b id=\"reloj\">--:--:--</b><span id=\"actualizado\">Cargando</span></div>\n    <button type=\"button\" class=\"btn\" id=\"btnPausa\" aria-pressed=\"false\">Pausar</button>\n    <button type=\"button\" class=\"btn principal\" id=\"btnExportar\">Exportar métricas</button>\n  </div>\n  <div class=\"avance\"><i id=\"avance\"></i></div>\n</header>\n\n<main class=\"pagina\">\n  <div id=\"avisos\"></div>\n  <div id=\"contenido\"><div class=\"cargando\">Leyendo Help Scout. La primera carga puede tardar hasta un minuto.</div></div>\n</main>\n\n<dialog id=\"dlgExportar\" aria-labelledby=\"tituloExportar\">\n  <div class=\"dlg-cab\">\n    <div><h3 id=\"tituloExportar\">Exportar métricas</h3><p id=\"subExportar\">Datos del historial del tracker (hoja HS_Eventos).</p></div>\n    <button type=\"button\" class=\"btn chico\" data-cerrar>Cerrar</button>\n  </div>\n  <div class=\"dlg-cuerpo\">\n    <div class=\"filtros\">\n      <div class=\"campo\">\n        <label for=\"expPeriodo\">Periodo</label>\n        <select id=\"expPeriodo\">\n          <option value=\"hoy\">Hoy</option>\n          <option value=\"ayer\">Ayer</option>\n          <option value=\"semana\" selected>Esta semana</option>\n          <option value=\"semanaPasada\">Semana pasada</option>\n          <option value=\"mes\">Este mes</option>\n          <option value=\"mesPasado\">Mes pasado</option>\n          <option value=\"todo\">Todo el historial</option>\n          <option value=\"personal\">Personalizado</option>\n        </select>\n        <div class=\"fechas\">\n          <div><span>Desde</span><input type=\"date\" id=\"expDesde\" aria-label=\"Desde\"></div>\n          <div><span>Hasta</span><input type=\"date\" id=\"expHasta\" aria-label=\"Hasta\"></div>\n        </div>\n      </div>\n      <div class=\"campo\">\n        <span class=\"rot\">Agentes</span>\n        <div class=\"checks\" id=\"expAgentes\"></div>\n      </div>\n      <div class=\"campo\">\n        <span class=\"rot\">Movimientos en la hoja de detalle</span>\n        <div class=\"checks\" id=\"expTipos\">\n          <label><input type=\"checkbox\" value=\"ASIGNADO\" checked> Asignados</label>\n          <label><input type=\"checkbox\" value=\"RESPUESTA\" checked> Respuestas</label>\n          <label><input type=\"checkbox\" value=\"PRIMERA_RESPUESTA\" checked> Primeras respuestas</label>\n          <label><input type=\"checkbox\" value=\"NUEVA_CONSULTA\" checked> Nuevas consultas</label>\n          <label><input type=\"checkbox\" value=\"REASIGNADO\" checked> Re-asignados</label>\n          <label><input type=\"checkbox\" value=\"CERRADO\" checked> Cerrados</label>\n        </div>\n      </div>\n    </div>\n    <div class=\"acciones\">\n      <button type=\"button\" class=\"btn\" id=\"expVer\">Ver vista previa</button>\n      <button type=\"button\" class=\"btn principal\" id=\"expExcel\">Descargar Excel</button>\n      <select id=\"expCsvHoja\" aria-label=\"Hoja para CSV\" style=\"height:36px;padding:0 10px;border-radius:6px;border:1px solid var(--line-2);background:var(--bg);color-scheme:dark\">\n        <option value=\"agentes\">CSV · Resumen por agente</option>\n        <option value=\"dias\">CSV · Por día</option>\n        <option value=\"detalle\">CSV · Detalle de movimientos</option>\n      </select>\n      <button type=\"button\" class=\"btn\" id=\"expCsv\">Descargar CSV</button>\n      <span class=\"nota\" id=\"expEstado\" role=\"status\"></span>\n    </div>\n    <div class=\"previa\" id=\"expPrevia\"></div>\n  </div>\n</dialog>\n\n<dialog id=\"dlgDetalle\" aria-labelledby=\"tituloDetalle\">\n  <div class=\"dlg-cab\">\n    <div><h3 id=\"tituloDetalle\">Detalle</h3><p id=\"subDetalle\"></p></div>\n    <button type=\"button\" class=\"btn chico\" data-cerrar>Cerrar</button>\n  </div>\n  <div class=\"dlg-cuerpo\" id=\"cuerpoDetalle\"></div>\n</dialog>\n\n<script>\n(function () {\n  'use strict';\n  var datos = null, desfase = 0, filtro = 'todos', pausado = false, enCurso = false, ultimaOk = 0, proxima = 0, temporizador = null;\n  var demo = typeof google === 'undefined' || !google.script || !google.script.run;\n  var reporte = null;\n\n  var $ = function (id) { return document.getElementById(id); };\n  var todos = function (sel, raiz) { return Array.prototype.slice.call((raiz || document).querySelectorAll(sel)); };\n  var ahora = function () { return Date.now() + desfase; };\n  var esc = function (t) {\n    return String(t == null ? '' : t).replace(/[&<>\"']/g, function (c) {\n      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' }[c];\n    });\n  };\n  var p2 = function (n) { return (n < 10 ? '0' : '') + n; };\n  function dur(seg) {\n    seg = Math.max(0, Math.floor(seg));\n    var d = Math.floor(seg / 86400), h = Math.floor(seg % 86400 / 3600), m = Math.floor(seg % 3600 / 60), s = seg % 60;\n    if (d) return d + ' d ' + p2(h) + ':' + p2(m) + ':' + p2(s);\n    return p2(h) + ':' + p2(m) + ':' + p2(s);\n  }\n  function corto(seg) {\n    seg = Math.max(0, Math.floor(seg));\n    if (seg < 60) return seg + ' s';\n    if (seg < 3600) return Math.floor(seg / 60) + ' min';\n    if (seg < 86400) return Math.floor(seg / 3600) + ' h ' + p2(Math.floor(seg % 3600 / 60)) + ' min';\n    return Math.floor(seg / 86400) + ' d ' + Math.floor(seg % 86400 / 3600) + ' h';\n  }\n  function minTxt(m) {\n    if (m == null) return '—';\n    if (m < 60) return (Math.round(m * 10) / 10).toLocaleString('es') + ' min';\n    return Math.floor(m / 60) + ' h ' + p2(Math.round(m % 60)) + ' min';\n  }\n  function tz() { return (datos && datos.tz) || 'America/New_York'; }\n  function hora(ms, seg) {\n    var o = { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: tz() };\n    if (seg) o.second = '2-digit';\n    try { return new Date(ms).toLocaleTimeString('es', o); } catch (e) { return new Date(ms).toTimeString().slice(0, seg ? 8 : 5); }\n  }\n  function tono(min) {\n    var meta = (datos && datos.metaRespuestaMin) || 60;\n    return min < meta / 2 ? 'ok' : min < meta ? 'warn' : 'bad';\n  }\n  function servidor(fn, arg, listo) {\n    if (demo) { setTimeout(function () { listo(JSON.stringify(DEMO[fn](arg))); }, 250); return; }\n    var corre = google.script.run\n      .withSuccessHandler(listo)\n      .withFailureHandler(function (err) { listo(JSON.stringify({ ok: false, error: String(err && err.message || err) })); });\n    if (arg === undefined) corre[fn](); else corre[fn](arg);\n  }\n  function leer(texto) { try { return JSON.parse(texto); } catch (e) { return { ok: false, error: 'Respuesta no válida del servidor.' }; } }\n\n  // ---------- Datos en vivo ----------\n  function pedir() {\n    if (enCurso || pausado) return;\n    enCurso = true;\n    servidor('datosPanelEnVivo', undefined, function (texto) { enCurso = false; recibir(leer(texto)); programar(); });\n  }\n  function intervalo() {\n    if (!datos) return 10;\n    return datos.enHorario ? (datos.segundos || 5) : (datos.segundosFueraDeHorario || 60);\n  }\n  function programar() {\n    clearTimeout(temporizador);\n    if (pausado) return;\n    var s = intervalo();\n    proxima = Date.now() + s * 1000;\n    temporizador = setTimeout(pedir, s * 1000);\n  }\n  var errorActual = '';\n  function recibir(r) {\n    if (!r.ok) {\n      errorActual = r.error || 'Error desconocido';\n      pintarAvisos();\n      if (!datos) $('contenido').innerHTML = '<div class=\"cargando\">Sin datos todavía. Reintentando.</div>';\n      return;\n    }\n    errorActual = '';\n    desfase = Date.parse(r.ahora) - Date.now();\n    datos = r;\n    ultimaOk = Date.now();\n    pintarAvisos();\n    pintar();\n  }\n  function pintarAvisos() {\n    var h = '';\n    if (errorActual) {\n      h += '<div class=\"aviso error\" role=\"alert\"><b>No se pudo leer Help Scout.</b> ' + esc(errorActual) +\n        (datos ? ' Se muestran los últimos datos recibidos (' + hora(ultimaOk + desfase, true) + ').' : '') + '</div>';\n    }\n    if (datos && datos.verificacion && !datos.verificacion.ok) {\n      h += '<div class=\"aviso error\" role=\"alert\"><b>La lectura no cuadra con Help Scout.</b> ' + esc(datos.verificacion.avisos.join(' · ')) + '</div>';\n    }\n    if (datos && datos.sinVincular && datos.sinVincular.length) {\n      h += '<div class=\"aviso\">No encontré en Help Scout a: ' + esc(datos.sinVincular.join(', ')) + '. Revisa su email en la configuración (AGENTES).</div>';\n    }\n    if (demo) h += '<div class=\"aviso\">Vista de demostración con datos de ejemplo. Los datos reales aparecen al abrir la página publicada desde Apps Script.</div>';\n    $('avisos').innerHTML = h;\n  }\n\n  // ---------- Pintado ----------\n  function reloj(desde, clases, extra) {\n    return '<span class=\"reloj ' + (clases || '') + '\" data-desde=\"' + esc(desde) + '\"' + (extra || '') + '>' + dur((ahora() - Date.parse(desde)) / 1000) + '</span>';\n  }\n  function ind(l, v, n) { return '<div class=\"ind\"><div class=\"l\">' + esc(l) + '</div><div class=\"v\">' + v + '</div><div class=\"n\">' + esc(n) + '</div></div>'; }\n\n  function pintar() {\n    var p = datos.panel, e = p.equipo, viejo = null;\n    p.agentes.forEach(function (a) { if (a.esperando.length && (!viejo || a.esperando[0].esperaDesde < viejo)) viejo = a.esperando[0].esperaDesde; });\n    var h = '';\n    h += '<section class=\"indicadores\" aria-label=\"Indicadores del equipo\">' +\n      ind('Clientes esperando', e.esperando, e.abiertos + ' casos abiertos · ' + e.seguimiento + ' en seguimiento') +\n      ind('Mayor espera', viejo ? reloj(viejo, '', ' data-tono=\"1\"') : '—', viejo ? 'reloj en vivo · hh:mm:ss' : 'nadie esperando') +\n      ind('Respuestas hoy', e.respuestas, 'en ' + e.casosRespondidos + ' casos') +\n      ind('Cerrados hoy', e.cerrados, e.asignados + ' asignados · ' + e.reasignados + ' re-asignados') +\n      ind('Tiempo de respuesta', minTxt(e.promedioRespuestaMin), 'promedio · mediana ' + minTxt(e.medianaRespuestaMin)) +\n      ind('Sin asignar', p.sinAsignar.length, p.sinAsignar.length ? 'con el cliente esperando' : 'cola vacía') +\n      '</section>';\n\n    h += '<section class=\"seccion\"><div class=\"seccion-cab\"><h2>Agentes</h2><p>Jornada del ' + esc(diaLargo(datos.hoy)) +\n      ' · clic en una fila para filtrar la cola</p></div><div class=\"caja\"><div class=\"desliza\"><table class=\"t-agentes\">' +\n      '<thead><tr><th>Agente</th><th class=\"num grupo-izq\">Esperando</th><th class=\"num\">Mayor espera</th><th class=\"num\">Seguimiento</th><th class=\"num\">Abiertos</th>' +\n      '<th class=\"num grupo-izq\">Asignados</th><th class=\"num\">Respuestas</th><th class=\"num\">Casos</th><th class=\"num\">Cerrados</th><th class=\"num\">Re-asig.</th>' +\n      '<th class=\"num grupo-izq\">T. respuesta</th><th class=\"num\">1ª respuesta</th><th class=\"num\">Últ. respuesta</th><th></th></tr></thead><tbody>' +\n      p.agentes.map(filaAgente).join('') + '</tbody><tfoot><tr><td>Equipo</td>' +\n      '<td class=\"num grupo-izq\">' + e.esperando + '</td><td class=\"num\">' + (viejo ? reloj(viejo, '', ' data-tono=\"1\"') : '—') + '</td><td class=\"num\">' + e.seguimiento + '</td><td class=\"num\">' + e.abiertos + '</td>' +\n      '<td class=\"num grupo-izq\">' + e.asignados + '</td><td class=\"num\">' + e.respuestas + '</td><td class=\"num\">' + e.casosRespondidos + '</td><td class=\"num\">' + e.cerrados + '</td><td class=\"num\">' + e.reasignados + '</td>' +\n      '<td class=\"num grupo-izq\">' + minTxt(e.promedioRespuestaMin) + '</td><td class=\"num\">' + minTxt(e.promedioPrimeraMin) + '</td><td></td><td></td></tr></tfoot></table></div></div></section>';\n\n    h += '<section class=\"seccion dos\"><div class=\"col-a\"><div class=\"seccion-cab\"><h2>Clientes esperando respuesta</h2><p>Del que más espera al más reciente · meta ' +\n      datos.metaRespuestaMin + ' min</p></div><div class=\"caja\" id=\"cola\"></div></div>' +\n      '<div class=\"col-b\"><div class=\"seccion-cab\"><h2>Registro de actividad</h2><p>Últimos ' + p.feed.length + ' movimientos</p></div><div class=\"caja\">' + registro(p.feed) + '</div></div></section>';\n\n    var v = datos.verificacion;\n    h += '<footer class=\"pie\"><span>Horario ' + datos.horario.inicio + ':00–' + datos.horario.fin + ':00 (' + esc(tz()) + ') · tiempos de respuesta en horario laboral · relojes de espera en tiempo real</span>' +\n      '<span>' + (v ? (v.ok ? 'Verificado con Help Scout ' : 'Lectura con diferencias ') + hora(Date.parse(v.hora), true) + ' · ' + v.casosAbiertos + ' casos abiertos · ' + v.casosDelDia + ' casos con movimiento' : '') + '</span></footer>';\n\n    $('contenido').innerHTML = h;\n    todos('.t-agentes tbody tr[data-id]').forEach(function (tr) {\n      tr.addEventListener('click', function (ev) {\n        if (ev.target.closest('button')) return;\n        var id = tr.getAttribute('data-id');\n        filtro = filtro === id ? 'todos' : id;\n        marcar(); pintarCola();\n      });\n    });\n    todos('[data-detalle]').forEach(function (b) { b.addEventListener('click', function () { abrirDetalle(b.getAttribute('data-detalle'), b.getAttribute('data-nombre')); }); });\n    marcar();\n    pintarCola();\n    tic();\n  }\n\n  function filaAgente(a) {\n    if (!a.vinculado || !a.hoy) {\n      return '<tr><td class=\"nombre\">' + esc(a.nombre) + '</td><td colspan=\"13\" class=\"tenue\">No está vinculada con un usuario de Help Scout</td></tr>';\n    }\n    var h = a.hoy, viejo = a.esperando.length ? a.esperando[0].esperaDesde : null;\n    return '<tr data-id=\"' + a.id + '\">' +\n      '<td><div class=\"nombre\">' + esc(a.nombre) + '</div>' +\n      '<span class=\"est tenue\" data-ultima=\"' + esc(h.ultimaRespuesta || '') + '\" data-esperando=\"' + a.esperando.length + '\"><i></i><span>—</span></span></td>' +\n      '<td class=\"num fuerte grupo-izq\">' + a.esperando.length + '</td>' +\n      '<td class=\"num\">' + (viejo ? reloj(viejo, '', ' data-tono=\"1\"') : '<span class=\"tenue\">—</span>') + '</td>' +\n      '<td class=\"num\">' + a.seguimiento + '</td><td class=\"num\">' + a.abiertos + '</td>' +\n      '<td class=\"num grupo-izq\">' + h.asignados + '</td><td class=\"num\">' + h.respuestas + '</td><td class=\"num\">' + h.casosRespondidos + '</td><td class=\"num\">' + h.cerrados + '</td><td class=\"num\">' + h.reasignados + '</td>' +\n      '<td class=\"num grupo-izq\">' + minTxt(h.promedioRespuestaMin) + '</td><td class=\"num\">' + minTxt(h.promedioPrimeraMin) + '</td>' +\n      '<td class=\"num\">' + (h.ultimaRespuesta ? 'hace <span class=\"reloj\" data-desde=\"' + esc(h.ultimaRespuesta) + '\" data-corto=\"1\">' + corto((ahora() - Date.parse(h.ultimaRespuesta)) / 1000) + '</span>' : '<span class=\"tenue\">sin respuestas hoy</span>') + '</td>' +\n      '<td class=\"num\"><button type=\"button\" class=\"btn chico\" data-detalle=\"' + a.id + '\" data-nombre=\"' + esc(a.nombre) + '\">Detalle</button></td></tr>';\n  }\n  function marcar() {\n    todos('.t-agentes tbody tr[data-id]').forEach(function (tr) { tr.classList.toggle('sel', tr.getAttribute('data-id') === String(filtro)); });\n  }\n\n  function pintarCola() {\n    var p = datos.panel, filas = [];\n    p.agentes.forEach(function (a) { a.esperando.forEach(function (t) { filas.push(t); }); });\n    p.sinAsignar.forEach(function (t) { filas.push(t); });\n    var pest = [{ id: 'todos', t: 'Todos', n: filas.length }]\n      .concat(p.agentes.filter(function (a) { return a.vinculado; }).map(function (a) { return { id: String(a.id), t: a.nombre, n: a.esperando.length }; }))\n      .concat([{ id: 'sin', t: 'Sin asignar', n: p.sinAsignar.length }]);\n    if (!pest.some(function (x) { return x.id === String(filtro); })) filtro = 'todos';\n    var visibles = filas.filter(function (t) {\n      return filtro === 'todos' || (filtro === 'sin' ? !t.agenteId : String(t.agenteId) === String(filtro));\n    }).sort(function (x, y) { return x.esperaDesde < y.esperaDesde ? -1 : x.esperaDesde > y.esperaDesde ? 1 : 0; });\n    var h = '<div class=\"pestanas\" role=\"tablist\">' + pest.map(function (x) {\n      var sel = String(filtro) === x.id;\n      return '<button type=\"button\" role=\"tab\" aria-selected=\"' + sel + '\" class=\"pest' + (sel ? ' sel' : '') + '\" data-f=\"' + x.id + '\">' + esc(x.t) + '<span>' + x.n + '</span></button>';\n    }).join('') + '</div>';\n    if (!visibles.length) {\n      h += '<div class=\"vacio\">Ningún cliente está esperando respuesta.</div>';\n    } else {\n      h += '<div class=\"desliza\"><table class=\"t-cola\"><thead><tr><th>Espera</th><th>Caso</th><th>Asunto</th><th>Cliente</th><th>Agente</th><th>Estado en Help Scout</th></tr></thead><tbody>' +\n        visibles.map(function (t) {\n          return '<tr><td>' + reloj(t.esperaDesde, 'espera', ' data-tono=\"1\" data-barra=\"1\"') + '<span class=\"barra\"><i></i></span></td>' +\n            '<td><a href=\"' + esc(t.url) + '\" target=\"_blank\" rel=\"noopener\"><b>#' + esc(t.numero) + '</b></a></td>' +\n            '<td class=\"asunto\" title=\"' + esc(t.asunto) + '\">' + esc(t.asunto) + '</td>' +\n            '<td class=\"tenue\">' + esc(t.cliente || '—') + '</td>' +\n            '<td>' + (t.agenteId ? esc(t.agente) : '<span class=\"bad\">Sin asignar</span>') + '</td>' +\n            '<td class=\"tenue\">' + (t.estado === 'pending' ? 'Pending' : 'Active') + (t.buzon ? ' · ' + esc(t.buzon) : '') + '</td></tr>';\n        }).join('') + '</tbody></table></div>';\n    }\n    $('cola').innerHTML = h;\n    todos('.pest').forEach(function (b) { b.addEventListener('click', function () { filtro = b.getAttribute('data-f'); marcar(); pintarCola(); }); });\n    tic();\n  }\n\n  var TIPOS = {\n    RESPUESTA: ['Respuesta', 'ok'], CLIENTE: ['Cliente', 'warn'], ASIGNADO: ['Asignado', ''], CERRADO: ['Cerrado', 'ok'],\n    REASIGNADO: ['Re-asignado', 'tenue'], NUEVA_CONSULTA: ['Consulta', 'warn'], PRIMERA_RESPUESTA: ['1ª respuesta', 'ok'],\n  };\n  function textoMovimiento(f) {\n    var caso = '<a href=\"' + esc(f.url) + '\" target=\"_blank\" rel=\"noopener\"><b>#' + esc(f.numero) + '</b></a>';\n    var ag = esc(f.agente || '');\n    if (f.tipo === 'RESPUESTA') return ag + ' respondió ' + caso + (f.minutos != null ? ' <span class=\"tenue\">en ' + minTxt(f.minutos) + '</span>' : '');\n    if (f.tipo === 'CLIENTE') return 'El cliente escribió en ' + caso + (ag ? ' <span class=\"tenue\">· ' + ag + '</span>' : ' <span class=\"bad\">· sin asignar</span>');\n    if (f.tipo === 'ASIGNADO') return caso + ' asignado a ' + ag;\n    if (f.tipo === 'CERRADO') return ag + ' cerró ' + caso;\n    if (f.tipo === 'REASIGNADO') return ag + ' re-asignó ' + caso;\n    if (f.tipo === 'NUEVA_CONSULTA') return 'Nueva consulta en ' + caso + ' <span class=\"tenue\">· ' + ag + '</span>';\n    return ag + ' ' + caso;\n  }\n  function registro(items) {\n    if (!items.length) return '<div class=\"vacio\">Todavía no hay movimientos en esta jornada.</div>';\n    return '<ol class=\"registro\">' + items.map(function (f) {\n      var t = TIPOS[f.tipo] || [f.tipo, ''];\n      return '<li><time>' + esc(hora(Date.parse(f.fecha), false)) + '</time><span class=\"tipo ' + t[1] + '\">' + esc(t[0]) + '</span>' +\n        '<span class=\"txt\">' + textoMovimiento(f) + '<small>' + esc(f.asunto || '') + '</small></span></li>';\n    }).join('') + '</ol>';\n  }\n  function diaLargo(d) {\n    try { return new Date(d + 'T12:00:00Z').toLocaleDateString('es', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' }); } catch (e) { return d; }\n  }\n\n  // ---------- Cada segundo ----------\n  function conexion(clase, texto) {\n    var el = $('conexion');\n    el.className = 'estado-con ' + clase;\n    el.lastElementChild.textContent = texto;\n  }\n  function tic() {\n    var t = ahora();\n    $('reloj').textContent = hora(t, true);\n    if (!datos) { if (errorActual) conexion('bad', 'Sin conexión'); return; }\n    var hace = Math.max(0, Math.floor((Date.now() - ultimaOk) / 1000));\n    var atrasado = hace > Math.max(30, intervalo() * 4);\n    $('actualizado').textContent = pausado ? 'En pausa · datos de hace ' + corto(hace)\n      : 'Actualizado hace ' + corto(hace) + ' · cada ' + intervalo() + ' s';\n    if (pausado) conexion('warn', 'En pausa');\n    else if (errorActual || atrasado) conexion('bad', 'Sin conexión');\n    else if (!datos.enHorario) conexion('tenue', 'Fuera de horario');\n    else conexion('ok', 'En vivo');\n    $('avance').style.width = pausado ? '0' : Math.min(100, Math.max(0, 100 - (proxima - Date.now()) / (intervalo() * 1000) * 100)) + '%';\n\n    var meta = datos.metaRespuestaMin || 60;\n    todos('.reloj[data-desde]').forEach(function (el) {\n      var seg = (t - Date.parse(el.getAttribute('data-desde'))) / 1000;\n      el.textContent = el.getAttribute('data-corto') ? corto(seg) : dur(seg);\n      if (el.getAttribute('data-tono')) {\n        var c = tono(seg / 60);\n        el.classList.remove('ok', 'warn', 'bad');\n        el.classList.add(c);\n        if (el.getAttribute('data-barra')) {\n          var b = el.parentNode.querySelector('.barra');\n          b.className = 'barra ' + c;\n          b.firstChild.style.width = Math.min(100, seg / 60 / meta * 100) + '%';\n        }\n      }\n    });\n    var alerta = datos.alertaSinResponderMin || [10, 30];\n    todos('.est[data-esperando]').forEach(function (el) {\n      var esperando = Number(el.getAttribute('data-esperando')), ultima = el.getAttribute('data-ultima');\n      var min = ultima ? (t - Date.parse(ultima)) / 60000 : Infinity, clase, texto;\n      if (!esperando) { clase = 'ok'; texto = 'Al día'; }\n      else if (!datos.enHorario) { clase = 'tenue'; texto = 'Fuera de horario'; }\n      else if (min < alerta[0]) { clase = 'ok'; texto = 'Respondiendo'; }\n      else if (min < alerta[1]) { clase = 'warn'; texto = 'Sin responder ' + Math.floor(min) + ' min'; }\n      else { clase = 'bad'; texto = ultima ? 'Sin responder ' + corto(min * 60) : 'Sin responder hoy'; }\n      el.className = 'est ' + clase;\n      el.lastElementChild.textContent = texto;\n    });\n  }\n\n  // ---------- Detalle de una agente ----------\n  function abrirDetalle(id, nombre) {\n    $('tituloDetalle').textContent = nombre;\n    $('subDetalle').textContent = 'Cada cifra de la tabla sale de estas listas.';\n    $('cuerpoDetalle').innerHTML = '<div class=\"vacio\">Cargando.</div>';\n    $('dlgDetalle').showModal();\n    servidor('detalleAgentePanel', id, function (texto) {\n      var d = leer(texto);\n      if (!d.ok) { $('cuerpoDetalle').innerHTML = '<div class=\"aviso error\">' + esc(d.error) + '</div>'; return; }\n      var cuenta = function (tipo) { return d.movimientos.filter(function (m) { return m.tipo === tipo; }).length; };\n      var unicos = function (tipo) { var s = {}; d.movimientos.forEach(function (m) { if (m.tipo === tipo) s[m.numero] = 1; }); return Object.keys(s).length; };\n      var esperando = d.abiertos.filter(function (x) { return x.esperaDesde; }).length;\n      var h = '<div class=\"resumen-dlg\">' +\n        '<div><b>' + esperando + '</b><span>Esperando</span></div><div><b>' + (d.abiertos.length - esperando) + '</b><span>En seguimiento</span></div>' +\n        '<div><b>' + unicos('ASIGNADO') + '</b><span>Asignados</span></div><div><b>' + cuenta('RESPUESTA') + '</b><span>Respuestas</span></div>' +\n        '<div><b>' + unicos('CERRADO') + '</b><span>Cerrados</span></div><div><b>' + unicos('REASIGNADO') + '</b><span>Re-asignados</span></div></div>';\n      h += '<div class=\"previa\"><h4>Casos abiertos (' + d.abiertos.length + ')</h4><div class=\"caja\"><div class=\"desliza\"><table><thead><tr><th>Caso</th><th>Asunto</th><th>Cliente</th><th>Estado</th><th>Cliente espera desde</th></tr></thead><tbody>' +\n        (d.abiertos.map(function (x) {\n          return '<tr><td><a href=\"' + esc(x.url) + '\" target=\"_blank\" rel=\"noopener\"><b>#' + esc(x.numero) + '</b></a></td><td class=\"asunto\">' + esc(x.asunto) + '</td><td class=\"tenue\">' + esc(x.cliente) +\n            '</td><td class=\"tenue\">' + (x.estado === 'pending' ? 'Pending' : 'Active') + '</td><td>' + (x.esperaDesde ? esc(hora(Date.parse(x.esperaDesde), true)) + ' · ' + corto((ahora() - Date.parse(x.esperaDesde)) / 1000) : '<span class=\"tenue\">respondido, en seguimiento</span>') + '</td></tr>';\n        }).join('') || '<tr><td colspan=\"5\" class=\"vacio\">Sin casos abiertos.</td></tr>') + '</tbody></table></div></div></div>';\n      h += '<div class=\"previa\"><h4>Movimientos de la jornada (' + d.movimientos.length + ')</h4><div class=\"caja\"><div class=\"desliza\"><table><thead><tr><th>Hora</th><th>Movimiento</th><th>Caso</th><th>Asunto</th><th class=\"num\">Minutos laborales</th></tr></thead><tbody>' +\n        (d.movimientos.map(function (m) {\n          var t = TIPOS[m.tipo] || [m.tipo, ''];\n          return '<tr><td>' + esc(hora(Date.parse(m.fecha), true)) + '</td><td class=\"' + t[1] + '\">' + esc(t[0]) + '</td><td><a href=\"' + esc(m.url) + '\" target=\"_blank\" rel=\"noopener\"><b>#' + esc(m.numero) +\n            '</b></a></td><td class=\"asunto\">' + esc(m.asunto) + '</td><td class=\"num\">' + (m.minutos == null ? '<span class=\"tenue\">—</span>' : m.minutos) + '</td></tr>';\n        }).join('') || '<tr><td colspan=\"5\" class=\"vacio\">Sin movimientos.</td></tr>') + '</tbody></table></div></div></div>';\n      $('cuerpoDetalle').innerHTML = h;\n    });\n  }\n\n  // ---------- Exportar ----------\n  function hoyLocal() {\n    try { return new Intl.DateTimeFormat('en-CA', { timeZone: tz(), year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ahora())); }\n    catch (e) { return new Date(ahora()).toISOString().slice(0, 10); }\n  }\n  function sumarDias(d, n) { var f = new Date(d + 'T12:00:00Z'); f.setUTCDate(f.getUTCDate() + n); return f.toISOString().slice(0, 10); }\n  function rango(tipo) {\n    var hoy = hoyLocal(), f = new Date(hoy + 'T12:00:00Z'), lunes = sumarDias(hoy, -((f.getUTCDay() + 6) % 7));\n    var mes1 = hoy.slice(0, 8) + '01';\n    if (tipo === 'hoy') return [hoy, hoy];\n    if (tipo === 'ayer') return [sumarDias(hoy, -1), sumarDias(hoy, -1)];\n    if (tipo === 'semana') return [lunes, hoy];\n    if (tipo === 'semanaPasada') return [sumarDias(lunes, -7), sumarDias(lunes, -1)];\n    if (tipo === 'mes') return [mes1, hoy];\n    if (tipo === 'mesPasado') { var fin = sumarDias(mes1, -1); return [fin.slice(0, 8) + '01', fin]; }\n    if (tipo === 'todo') return [(datos && datos.fechaInicio) || '2026-01-01', hoy];\n    return null;\n  }\n  function aplicarPeriodo() {\n    var r = rango($('expPeriodo').value);\n    if (r) { $('expDesde').value = r[0]; $('expHasta').value = r[1]; }\n  }\n  function filtrosExportar() {\n    return {\n      desde: $('expDesde').value, hasta: $('expHasta').value,\n      agentes: todos('#expAgentes input:checked').map(function (i) { return i.value; }),\n      tipos: todos('#expTipos input:checked').map(function (i) { return i.value; }),\n    };\n  }\n  function abrirExportar() {\n    var nombres = (datos && datos.agentes) || [];\n    if (!$('expAgentes').children.length) {\n      $('expAgentes').innerHTML = nombres.map(function (n) { return '<label><input type=\"checkbox\" value=\"' + esc(n) + '\" checked> ' + esc(n) + '</label>'; }).join('');\n      if (datos && datos.fechaInicio) { $('expDesde').min = datos.fechaInicio; $('expHasta').min = datos.fechaInicio; }\n      aplicarPeriodo();\n    }\n    $('expPrevia').innerHTML = '';\n    $('expEstado').textContent = '';\n    reporte = null;\n    $('dlgExportar').showModal();\n  }\n  function pedirReporte(despues) {\n    var f = filtrosExportar();\n    if (!f.desde || !f.hasta || f.desde > f.hasta) { $('expEstado').textContent = 'Revisa las fechas.'; return; }\n    if (!f.agentes.length) { $('expEstado').textContent = 'Elige al menos una agente.'; return; }\n    $('expEstado').textContent = 'Calculando.';\n    ['expVer', 'expExcel', 'expCsv'].forEach(function (id) { $(id).disabled = true; });\n    servidor('reporteMetricas', f, function (texto) {\n      ['expVer', 'expExcel', 'expCsv'].forEach(function (id) { $(id).disabled = false; });\n      var r = leer(texto);\n      if (!r.ok) { $('expEstado').textContent = ''; $('expPrevia').innerHTML = '<div class=\"aviso error\">' + esc(r.error) + '</div>'; return; }\n      reporte = r;\n      $('expEstado').textContent = r.porDia.length + ' filas por día · ' + r.detalle.length + ' movimientos';\n      pintarPrevia();\n      if (despues) despues();\n    });\n  }\n  var pct = function (v) { return v == null ? '—' : Math.round(v * 100) + '%'; };\n  var nv = function (v) { return v == null ? '—' : v.toLocaleString('es'); };\n  function pintarPrevia() {\n    var r = reporte;\n    var h = '';\n    if (r.sincronizacionIncompleta) h += '<div class=\"aviso\">La sincronización con Help Scout todavía está leyendo el historial: las cifras pueden estar incompletas.</div>';\n    h += '<div class=\"previa\"><h4>Resumen por agente · ' + esc(r.filtros.desde) + ' a ' + esc(r.filtros.hasta) + '</h4><div class=\"caja\"><div class=\"desliza\"><table><thead><tr>' +\n      '<th>Agente</th><th class=\"num\">Días</th><th class=\"num\">Asignados</th><th class=\"num\">Nuevas cons.</th><th class=\"num\">Re-asig.</th><th class=\"num\">Total</th><th class=\"num\">Cerrados</th><th class=\"num\">% Resol.</th>' +\n      '<th class=\"num\">Respuestas</th><th class=\"num\">T. resp. prom.</th><th class=\"num\">Mediana</th><th class=\"num\">% en meta</th><th class=\"num\">1ª resp.</th><th class=\"num\">Resolución</th></tr></thead><tbody>' +\n      r.porAgente.slice(0, -1).map(filaPrevia).join('') + '</tbody><tfoot>' + filaPrevia(r.porAgente[r.porAgente.length - 1]) + '</tfoot></table></div></div>' +\n      '<p class=\"tenue\" style=\"margin:10px 0 0;font-size:12px\">Sincronizado con Help Scout: ' + esc(r.ultimaSincronizacion || 'nunca') +\n      ' · historial desde ' + esc(r.fechaInicio) + '. El archivo incluye además el detalle por día, cada movimiento con su enlace y las definiciones.</p></div>';\n    $('expPrevia').innerHTML = h;\n  }\n  function filaPrevia(a) {\n    return '<tr><td class=\"nombre\">' + esc(a.agente === 'EQUIPO' ? 'Equipo' : a.agente) + '</td><td class=\"num\">' + a.dias + '</td><td class=\"num\">' + a.asignados + '</td><td class=\"num\">' + a.nuevaConsulta +\n      '</td><td class=\"num\">' + a.reasignados + '</td><td class=\"num\">' + a.total + '</td><td class=\"num\">' + a.cerrados + '</td><td class=\"num\">' + pct(a.pctResolucion) + '</td><td class=\"num\">' + a.respuestas +\n      '</td><td class=\"num\">' + minTxt(a.respuestaPromMin) + '</td><td class=\"num\">' + minTxt(a.respuestaMedianaMin) + '</td><td class=\"num\">' + pct(a.respuestaEnMeta) + '</td><td class=\"num\">' + minTxt(a.primeraPromMin) +\n      '</td><td class=\"num\">' + (a.resolucionPromH == null ? '—' : nv(a.resolucionPromH) + ' h') + '</td></tr>';\n  }\n\n  var NOMBRE_TIPO = { ASIGNADO: 'Asignado', RESPUESTA: 'Respuesta', PRIMERA_RESPUESTA: 'Primera respuesta', NUEVA_CONSULTA: 'Nueva consulta', REASIGNADO: 'Re-asignado', CERRADO: 'Cerrado' };\n  function hojas() {\n    var r = reporte, c = r.config, v = function (x) { return x == null ? '' : x; };\n    var agentes = [['Agente', 'Días con actividad', 'Sin atender al iniciar (suma diaria)', 'Asignados', 'Nuevas consultas', 'Re-asignados', 'Total gestionados (suma diaria)', 'Cerrados', '% Resolución',\n      'Días en verde', 'Días en amarillo', 'Días en rojo', 'Respuestas enviadas', 'Casos respondidos', 'Respuestas por día', 'Respuestas con tiempo medido', 'T. respuesta promedio (min)',\n      'T. respuesta mediana (min)', 'T. respuesta P90 (min)', 'T. respuesta máximo (min)', '% respuestas dentro de la meta', 'Primeras respuestas medidas', '1ª respuesta promedio (min)',\n      '1ª respuesta mediana (min)', '1ª respuesta P90 (min)', 'Cierres medidos', 'Resolución promedio (h)', 'Resolución mediana (h)', 'Resolución P90 (h)', '% resueltos dentro de la meta']]\n      .concat(r.porAgente.map(function (a) {\n        return [a.agente, a.dias, a.sinAtender, a.asignados, a.nuevaConsulta, a.reasignados, a.total, a.cerrados, v(a.pctResolucion), a.verde, a.amarillo, a.rojo, a.respuestas, a.casosRespondidos,\n          v(a.respuestasPorDia), a.respuestasMedidas, v(a.respuestaPromMin), v(a.respuestaMedianaMin), v(a.respuestaP90Min), v(a.respuestaMaxMin), v(a.respuestaEnMeta), a.primerasMedidas,\n          v(a.primeraPromMin), v(a.primeraMedianaMin), v(a.primeraP90Min), a.resolucionesMedidas, v(a.resolucionPromH), v(a.resolucionMedianaH), v(a.resolucionP90H), v(a.resolucionEnMeta)];\n      }));\n    var dias = [['Día de jornada', 'Agente', 'Sin atender al iniciar', 'Asignados', 'Nuevas consultas', 'Re-asignados', 'Total gestionados', 'Cerrados', 'Pendientes', '% Resolución', 'Semáforo',\n      'Respuestas enviadas', 'Casos respondidos', 'T. respuesta promedio (min)', 'T. respuesta mediana (min)', '% respuestas dentro de la meta', '1ª respuesta promedio (min)', 'Resolución promedio (h)']]\n      .concat(r.porDia.map(function (d) {\n        return [d.dia, d.agente, d.sinAtender, d.asignados, d.nuevaConsulta, d.reasignados, d.total, d.cerrados, d.pendientes, v(d.pctResolucion), v(d.semaforo), d.respuestas, d.casosRespondidos,\n          v(d.respuestaPromMin), v(d.respuestaMedianaMin), v(d.respuestaEnMeta), v(d.primeraPromMin), v(d.resolucionPromH)];\n      }));\n    var detalle = [['Día de jornada', 'Fecha y hora', 'Movimiento', 'Agente', '# Caso', 'Asunto', 'Minutos laborales', 'Enlace']]\n      .concat(r.detalle.map(function (e) { return [e.dia, e.fecha, NOMBRE_TIPO[e.tipo] || e.tipo, e.agente, e.numero, e.asunto, v(e.minutos), e.enlace]; }));\n    var notas = [['Métricas de soporte — Help Scout'], [],\n      ['Periodo', r.filtros.desde + ' a ' + r.filtros.hasta], ['Agentes', r.filtros.agentes.join(', ')],\n      ['Movimientos en el detalle', r.filtros.tipos ? r.filtros.tipos.map(function (t) { return NOMBRE_TIPO[t] || t; }).join(', ') : 'Todos'],\n      ['Generado', r.generado + ' (' + c.zonaHoraria + ')'], ['Última sincronización con Help Scout', r.ultimaSincronizacion || 'nunca'],\n      ['Historial disponible desde', r.fechaInicio], [],\n      ['Definiciones'],\n      ['Día de jornada', 'Lo que pasa después de las ' + c.horario.fin + ':00 o en un día no laboral cuenta para el siguiente día laboral.'],\n      ['Asignados', 'Casos que quedaron asignados al agente ese día. Cada caso cuenta una vez por día.'],\n      ['Nuevas consultas', 'El cliente volvió a escribir en un caso que el agente tenía desde un día anterior y ya había atendido.'],\n      ['Re-asignados', 'El caso pasó del agente a otra persona, equipo o buzón.'],\n      ['Sin atender al iniciar', 'Foto de las ' + c.horario.inicio + ':00: casos que el agente traía sin atender. La suma de varios días cuenta el mismo caso cada día que siguió abierto.'],\n      ['Total gestionados', 'Sin atender al iniciar + Asignados + Nuevas consultas − Re-asignados (igual que el tracker).'],\n      ['% Resolución', 'Cerrados ÷ Total gestionados. Semáforo: verde ≥ ' + c.semaforo.verde * 100 + '%, amarillo ≥ ' + c.semaforo.amarillo * 100 + '%, rojo por debajo.'],\n      ['Respuestas enviadas', 'Cada mensaje que el agente envió al cliente (no cuentan notas internas).'],\n      ['T. respuesta', 'Minutos desde el primer mensaje del cliente que estaba sin contestar hasta la respuesta. Solo se mide cuando había un mensaje del cliente esperando. Meta: ' + c.metaRespuestaMin + ' min.'],\n      ['1ª respuesta', 'Minutos desde que el caso quedó asignado al agente hasta su primera respuesta.'],\n      ['Resolución', 'Horas desde la asignación (o reapertura) hasta el cierre. Meta: ' + c.metaResolucionHoras + ' h. Los cierres automáticos de Help Scout no cuentan.'],\n      ['Tiempos', 'Todos los tiempos cuentan solo el horario laboral (' + c.horario.inicio + ':00–' + c.horario.fin + ':00, días laborales).'],\n      ['P90', 'El 90% de los casos tardó ese tiempo o menos.'],\n      ['Respuestas de días pasados', 'Las respuestas individuales se registran desde que se instaló esta versión. Para días anteriores usa en la hoja: Help Scout → Completar historial de respuestas.']];\n    return { agentes: agentes, dias: dias, detalle: detalle, notas: notas };\n  }\n  function nombreArchivo(ext, sufijo) { return 'metricas-soporte_' + reporte.filtros.desde + '_a_' + reporte.filtros.hasta + (sufijo ? '_' + sufijo : '') + '.' + ext; }\n  function bajar(blob, nombre) {\n    var a = document.createElement('a');\n    a.href = URL.createObjectURL(blob); a.download = nombre; document.body.appendChild(a); a.click();\n    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 2000);\n  }\n  function cargarXlsx(listo) {\n    if (window.XLSX) return listo(true);\n    var s = document.createElement('script');\n    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';\n    s.onload = function () { listo(!!window.XLSX); };\n    s.onerror = function () { listo(false); };\n    document.head.appendChild(s);\n  }\n  function descargarExcel() {\n    cargarXlsx(function (ok) {\n      if (!ok) { $('expEstado').textContent = 'No se pudo cargar el generador de Excel. Usa la descarga en CSV.'; return; }\n      var h = hojas(), libro = XLSX.utils.book_new();\n      var agregar = function (nombre, filas, anchos, columnasPct) {\n        var hoja = XLSX.utils.aoa_to_sheet(filas);\n        hoja['!cols'] = filas[0].map(function (t, i) { return { wch: (anchos && anchos[i]) || Math.max(12, Math.min(34, String(t).length + 2)) }; });\n        (columnasPct || []).forEach(function (col) {\n          for (var f = 1; f < filas.length; f++) {\n            var celda = hoja[XLSX.utils.encode_cell({ r: f, c: col })];\n            if (celda && typeof celda.v === 'number') celda.z = '0%';\n          }\n        });\n        if (filas.length > 1) hoja['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: filas.length - 1, c: filas[0].length - 1 } }) };\n        XLSX.utils.book_append_sheet(libro, hoja, nombre);\n      };\n      agregar('Resumen por agente', h.agentes, { 0: 24 }, [8, 20, 29]);\n      agregar('Por día', h.dias, { 0: 14, 1: 24 }, [9, 15]);\n      agregar('Detalle', h.detalle, { 0: 14, 1: 20, 2: 18, 3: 24, 5: 48, 7: 58 });\n      var notas = XLSX.utils.aoa_to_sheet(h.notas);\n      notas['!cols'] = [{ wch: 36 }, { wch: 120 }];\n      XLSX.utils.book_append_sheet(libro, notas, 'Notas');\n      var datosBin = XLSX.write(libro, { bookType: 'xlsx', type: 'array' });\n      bajar(new Blob([datosBin], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), nombreArchivo('xlsx'));\n      $('expEstado').textContent = 'Excel descargado.';\n    });\n  }\n  function descargarCsv() {\n    var cual = $('expCsvHoja').value, filas = hojas()[cual];\n    var texto = filas.map(function (f) {\n      return f.map(function (c) { var s = String(c == null ? '' : c); return /[\",\\n;]/.test(s) ? '\"' + s.replace(/\"/g, '\"\"') + '\"' : s; }).join(',');\n    }).join('\\r\\n');\n    bajar(new Blob(['﻿' + texto], { type: 'text/csv;charset=utf-8' }), nombreArchivo('csv', cual));\n    $('expEstado').textContent = 'CSV descargado.';\n  }\n\n  // ---------- Controles ----------\n  $('btnPausa').addEventListener('click', function () {\n    pausado = !pausado;\n    this.setAttribute('aria-pressed', pausado ? 'true' : 'false');\n    this.textContent = pausado ? 'Reanudar' : 'Pausar';\n    if (pausado) clearTimeout(temporizador); else pedir();\n    tic();\n  });\n  $('btnExportar').addEventListener('click', abrirExportar);\n  $('expPeriodo').addEventListener('change', aplicarPeriodo);\n  ['expDesde', 'expHasta'].forEach(function (id) { $(id).addEventListener('change', function () { $('expPeriodo').value = 'personal'; }); });\n  $('expVer').addEventListener('click', function () { pedirReporte(); });\n  $('expExcel').addEventListener('click', function () { pedirReporte(descargarExcel); });\n  $('expCsv').addEventListener('click', function () { pedirReporte(descargarCsv); });\n  todos('[data-cerrar]').forEach(function (b) { b.addEventListener('click', function () { b.closest('dialog').close(); }); });\n  todos('dialog').forEach(function (d) { d.addEventListener('click', function (ev) { if (ev.target === d) d.close(); }); });\n  document.addEventListener('visibilitychange', function () {\n    if (!document.hidden && !pausado && Date.now() - ultimaOk > intervalo() * 1000) pedir();\n  });\n\n  // ---------- Demostración (solo al abrir el archivo fuera de Apps Script) ----------\n  var DEMO = (function () {\n    var nombres = ['Jaideth Andocilla', 'Maryelin Rios', 'Edna Escudero', 'Andrés Rodríguez'];\n    var asuntos = ['Cobro duplicado en mi tarjeta', 'Solicitud de reembolso', 'No puedo iniciar sesión', 'Necesito la factura de mi compra', 'Cambio de fecha de mi entrada', 'El código QR no funciona', 'No me llegó el acceso', 'Transferir mi entrada'];\n    var clientes = ['José Martínez', 'Ana Lucía Torres', 'Diego Herrera', 'Luis Ramírez', 'Carlos Pérez', 'Valentina Castro', 'Laura Gómez', 'Camila Ortiz'];\n    function hace(min) { return new Date(Date.now() - min * 60000).toISOString(); }\n    function t(i, min, ag, estado) {\n      return { id: 4500 + i, numero: 4500 + i, asunto: asuntos[i % 8], cliente: clientes[i % 8], estado: estado || 'active', esperaDesde: hace(min), agenteId: ag ? ag : null, agente: ag ? nombres[ag - 1] : '', buzon: 'Soporte', url: '#' };\n    }\n    function hoy(r, c, a, re, pr, p1, ult) { return { respuestas: r, casosRespondidos: Math.round(r * .7), asignados: a, cerrados: c, reasignados: re, nuevasConsultas: 2, tiemposMedidos: r - 4, promedioRespuestaMin: pr, medianaRespuestaMin: pr - 2, promedioPrimeraMin: p1, ultimaRespuesta: hace(ult) }; }\n    function ag(id, esp, seg, h) { return { id: id, nombre: nombres[id - 1], vinculado: true, esperando: esp, seguimiento: seg, abiertos: esp.length + seg, activos: esp.length, pendientes: seg, hoy: h }; }\n    return {\n      datosPanelEnVivo: function () {\n        return {\n          ok: true, ahora: new Date().toISOString(), hoy: new Date().toISOString().slice(0, 10), tz: 'America/New_York', enHorario: true, horario: { inicio: 9, fin: 17 },\n          segundos: 5, segundosFueraDeHorario: 60, metaRespuestaMin: 60, alertaSinResponderMin: [10, 30], ultimaRecargaCompleta: hace(3), sinVincular: [],\n          verificacion: { hora: hace(3), ok: true, casosAbiertos: 15, casosDelDia: 96, avisos: [] }, agentes: nombres, fechaInicio: '2026-10-01', metaResolucionHoras: 8,\n          panel: {\n            agentes: [ag(1, [t(18, 41, 1), t(12, 12, 1)], 2, hoy(38, 17, 21, 2, 12.4, 9, 2)), ag(2, [t(1, 96, 2), t(9, 67, 2, 'pending'), t(20, 38, 2)], 1, hoy(19, 8, 18, 1, 43, 31, 34)),\n              ag(3, [t(32, 18, 3)], 3, hoy(44, 22, 23, 3, 8.2, 6, 1)), ag(4, [t(3, 54, 4), t(24, 27, 4)], 1, hoy(27, 11, 16, 4, 22, 15, 13))],\n            sinAsignar: [t(40, 7, 0), t(42, 1, 0)],\n            equipo: { esperando: 8, seguimiento: 7, abiertos: 15, respuestas: 128, casosRespondidos: 90, asignados: 78, cerrados: 58, reasignados: 10, nuevasConsultas: 8, tiemposMedidos: 112, promedioRespuestaMin: 18.4, medianaRespuestaMin: 12, promedioPrimeraMin: 14 },\n            feed: [['RESPUESTA', 3, 21, 0.4, 6], ['CLIENTE', 0, 42, 1, null], ['RESPUESTA', 1, 31, 2, 14], ['CERRADO', 3, 17, 5, 95], ['ASIGNADO', 4, 30, 9, null], ['REASIGNADO', 4, 11, 13, null], ['NUEVA_CONSULTA', 2, 70, 20, null], ['CLIENTE', 2, 20, 38, null]]\n              .map(function (f) { return { fecha: hace(f[3]), tipo: f[0], agente: f[1] ? nombres[f[1] - 1] : '', numero: 4500 + f[2], asunto: asuntos[f[2] % 8], minutos: f[4], url: '#' }; }),\n          },\n        };\n      },\n      detalleAgentePanel: function (id) {\n        return { ok: true, agente: nombres[id - 1], abiertos: [{ numero: 4518, asunto: asuntos[2], cliente: clientes[2], estado: 'active', esperaDesde: hace(41), url: '#' }, { numero: 4531, asunto: asuntos[5], cliente: clientes[5], estado: 'pending', esperaDesde: null, url: '#' }],\n          movimientos: [['RESPUESTA', 2, 14], ['CERRADO', 9, 95], ['RESPUESTA', 12, null], ['ASIGNADO', 30, null]].map(function (m, i) { return { fecha: hace(m[1]), tipo: m[0], numero: 4520 + i, asunto: asuntos[i], minutos: m[2], url: '#' }; }) };\n      },\n      reporteMetricas: function (f) {\n        var filas = f.agentes.map(function (n, i) {\n          return { agente: n, dias: 5, sinAtender: 9 + i, asignados: 80 + i * 7, nuevaConsulta: 12, reasignados: 6, total: 95 + i * 7, cerrados: 82 + i * 5, pctResolucion: 0.86, verde: 3, amarillo: 2, rojo: 0, respuestas: 160 + i * 11, casosRespondidos: 90,\n            respuestasPorDia: 32, respuestasMedidas: 140, respuestaPromMin: 18.2 + i, respuestaMedianaMin: 12, respuestaP90Min: 55, respuestaMaxMin: 190, respuestaEnMeta: 0.91, primerasMedidas: 80, primeraPromMin: 14, primeraMedianaMin: 9, primeraP90Min: 40,\n            resolucionesMedidas: 82, resolucionPromH: 3.4, resolucionMedianaH: 2.1, resolucionP90H: 9, resolucionEnMeta: 0.88 };\n        });\n        var eq = JSON.parse(JSON.stringify(filas[0])); eq.agente = 'EQUIPO';\n        return { ok: true, filtros: { desde: f.desde, hasta: f.hasta, agentes: f.agentes, tipos: f.tipos }, porAgente: filas.concat([eq]),\n          porDia: f.agentes.map(function (n) { return { dia: f.hasta, agente: n, sinAtender: 2, asignados: 16, nuevaConsulta: 2, reasignados: 1, total: 19, cerrados: 17, pendientes: 2, pctResolucion: 0.89, semaforo: 'AMARILLO', respuestas: 31, casosRespondidos: 20, respuestaPromMin: 17, respuestaMedianaMin: 11, respuestaEnMeta: 0.93, primeraPromMin: 12, resolucionPromH: 3.1 }; }),\n          detalle: [{ dia: f.hasta, fecha: f.hasta + ' 10:02:11', tipo: 'RESPUESTA', agente: f.agentes[0], numero: 4521, asunto: asuntos[0], minutos: 12, enlace: 'https://secure.helpscout.net/conversation/1/4521' }],\n          eventosTotales: 1, generado: f.hasta + ' 16:00', ultimaSincronizacion: f.hasta + ' 15:45', sincronizacionIncompleta: false, fechaInicio: '2026-10-01',\n          config: { horario: { inicio: 9, fin: 17 }, metaRespuestaMin: 60, metaResolucionHoras: 8, semaforo: { verde: 0.9, amarillo: 0.6 }, zonaHoraria: 'America/New_York' } };\n      },\n    };\n  })();\n\n  setInterval(tic, 1000);\n  tic();\n  pedir();\n})();\n</script>\n</body>\n</html>\n";

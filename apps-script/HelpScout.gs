@@ -68,13 +68,22 @@ function hsGet_(ruta, params) {
  * maxPaginas (opcional) corta la lectura después de esa cantidad de páginas.
  */
 function hsListarTodo_(ruta, params, clave, maxPaginas) {
+  return hsListarConTotal_(ruta, params, clave, maxPaginas).items;
+}
+
+/** Igual que hsListarTodo_, pero devuelve también el total que informa Help Scout (para verificar). */
+function hsListarConTotal_(ruta, params, clave, maxPaginas) {
   const todos = [];
+  let total = null;
   for (let pagina = 1; ; pagina++) {
     const data = hsGet_(ruta, Object.assign({}, params, { page: pagina }));
     const items = (data._embedded && data._embedded[clave]) || [];
     Array.prototype.push.apply(todos, items);
+    if (data.page && typeof data.page.totalElements === 'number') total = data.page.totalElements;
     const totalPaginas = data.page ? data.page.totalPages : 1;
-    if (!items.length || pagina >= totalPaginas || (maxPaginas && pagina >= maxPaginas)) return todos;
+    if (!items.length || pagina >= totalPaginas || (maxPaginas && pagina >= maxPaginas)) {
+      return { items: todos, total: total, completo: !items.length || pagina >= totalPaginas };
+    }
   }
 }
 

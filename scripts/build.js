@@ -2,7 +2,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const orden = ['Config', 'Util', 'Eventos', 'Metricas', 'EnVivo', 'HelpScout', 'Sync', 'Tracker', 'Resumen', 'Panel', 'Menu'];
+const orden = ['Config', 'Util', 'Eventos', 'Metricas', 'EnVivo', 'Reporte', 'HelpScout', 'Sync', 'Tracker', 'Resumen', 'Panel', 'Menu'];
 const carpeta = path.join(__dirname, '..', 'apps-script');
 const cuerpo = orden
   .map(n => '// ===== ' + n + '.gs =====\n' + fs.readFileSync(path.join(carpeta, n + '.gs'), 'utf8').trim())

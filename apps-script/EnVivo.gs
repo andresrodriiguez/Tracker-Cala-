@@ -3,93 +3,89 @@
  *
  * Cada conversación de Help Scout se resume en un objeto pequeño ("compacto") con lo que el panel
  * necesita: si el cliente está esperando y desde cuándo, a quién está asignada y lo que pasó en el
- * día de jornada actual (respuestas de cada agente con su tiempo de respuesta, asignaciones,
- * cierres, re-asignaciones...). El panel se arma juntando todos los compactos.
+ * día de jornada actual. Todo sale del HISTORIAL de mensajes (hilos) de la conversación, la misma
+ * fuente que usa el tracker; no se usan campos de resumen de Help Scout sin documentar.
  */
 
 const TIPOS_MENSAJE_ = ['message', 'chat', 'phone'];
 
-/** true si el cliente está esperando respuesta (su mensaje es el último). */
-function clienteEsperando(conv) {
-  if (conv.status === 'closed' || conv.status === 'spam') return false;
-  const espera = conv.customerWaitingSince || {};
-  const ultimo = espera.latestReplyFrom || conv.latestReplyFrom;
-  if (ultimo) return ultimo === 'customer';
-  return conv.status === 'active';
+function hilosPublicados_(conv) {
+  return ((conv._embedded && conv._embedded.threads) || [])
+    .filter(h => !h.state || h.state === 'published')
+    .slice()
+    .sort((a, b) => (new Date(a.createdAt) - new Date(b.createdAt)) || (a.id - b.id));
 }
 
 /**
- * Conversación de la API v2 de Help Scout → compacto.
- * Si la conversación trae sus hilos (_embedded.threads) se calcula también la actividad del día.
- * @param {Object} o  { agentePorId, dia(Date)→'yyyy-MM-dd', hoy, minutos(fin, inicio), ctxEventos }
+ * ¿El cliente está esperando respuesta? Lo está si el caso sigue abierto (active o pending) y su
+ * mensaje es el último: ninguna persona del equipo de Help Scout le ha contestado después.
+ * Las notas internas y los cambios de estado o de asignación no cuentan como respuesta.
+ * @return {{esperando: boolean, desde: string|null, mensajes: number}}
+ *   desde = fecha ISO del PRIMER mensaje del cliente que sigue sin contestar
+ */
+function esperaDeConversacion(conv) {
+  const abierta = (conv.status === 'active' || conv.status === 'pending') && (!conv.state || conv.state === 'published');
+  let desde = null;
+  let estado = null;
+  let mensajes = 0;
+  hilosPublicados_(conv).forEach(h => {
+    const autor = h.createdBy || {};
+    const esCliente = h.type === 'customer' || autor.type === 'customer';
+    const previo = estado;
+    if (h.status && h.status !== 'nochange') estado = h.status;
+    if (esCliente) {
+      mensajes++;
+      if (!desde) desde = new Date(h.createdAt);
+      return;
+    }
+    if (autor.type === 'user' && TIPOS_MENSAJE_.indexOf(h.type) >= 0) desde = null; // le respondieron
+    if (estado === 'closed' && previo !== 'closed') desde = null;                   // se cerró el caso
+  });
+  return { esperando: abierta && !!desde, desde: abierta && desde ? desde.toISOString() : null, mensajes: mensajes };
+}
+
+/**
+ * Conversación de la API v2 de Help Scout (con _embedded.threads) → compacto.
+ * @param {Object} o  { dia(Date)→'yyyy-MM-dd', hoy, ctxEventos (con incluirRespuestas: true) }
  */
 function resumirConversacion(conv, o) {
-  const espera = conv.customerWaitingSince || {};
   const cliente = conv.primaryCustomer || {};
-  const nombreCliente = [cliente.first, cliente.last].filter(Boolean).join(' ') ||
-    [cliente.firstName, cliente.lastName].filter(Boolean).join(' ') || cliente.email || '';
+  const nombreCliente = [cliente.first, cliente.last].filter(Boolean).join(' ') || cliente.email || '';
   const asignado = conv.assignee && Number(conv.assignee.id) > 0 ? Number(conv.assignee.id) : null;
-  const esperando = clienteEsperando(conv);
+  const espera = esperaDeConversacion(conv);
+  const borrada = !!conv.state && conv.state !== 'published';
   const c = {
     id: conv.id,
     n: conv.number,
     s: String(conv.subject || '(sin asunto)').slice(0, 140),
     c: String(nombreCliente).slice(0, 60),
-    st: conv.status,
+    st: borrada ? 'deleted' : conv.status,
     a: asignado,
     mb: conv.mailboxId || null,
-    w: esperando ? (espera.time || conv.userUpdatedAt || conv.createdAt || null) : null,
-    h: false, // trae la actividad del día (hilos)
-    ev: [],   // [tipo, agenteId, fechaIso, minutos]
-    r: [],    // respuestas de agentes del equipo hoy: [agenteId, fechaIso, minutosDeRespuesta|null]
-    cm: [],   // mensajes del cliente hoy: [fechaIso]
+    w: espera.desde,
+    ev: [], // actividad del equipo en el día de jornada: [tipo, agenteId, fechaIso, minutos]
+    cm: [], // mensajes del cliente en el día de jornada: [fechaIso]
   };
-
-  const hilos = conv._embedded && conv._embedded.threads;
-  if (!hilos) return c;
-  c.h = true;
+  if (borrada || conv.status === 'spam') return c;
 
   derivarEventos(conv, o.ctxEventos).forEach(ev => {
     if (ev.dia === o.hoy) c.ev.push([ev.tipo, ev.agenteId, ev.fecha.toISOString(), ev.minutos]);
   });
-
-  let clienteDesde = null;
-  hilos
-    .filter(t => !t.state || t.state === 'published')
-    .slice()
-    .sort((x, y) => (new Date(x.createdAt) - new Date(y.createdAt)) || (x.id - y.id))
-    .forEach(t => {
-      const autor = t.createdBy || {};
-      const fecha = new Date(t.createdAt);
-      const esHoy = o.dia(fecha) === o.hoy;
-      if (t.type === 'customer' || autor.type === 'customer') {
-        if (!clienteDesde) clienteDesde = fecha;
-        if (esHoy) c.cm.push(fecha.toISOString());
-        return;
-      }
-      if (autor.type !== 'user' || TIPOS_MENSAJE_.indexOf(t.type) < 0) return;
-      const agente = o.agentePorId(Number(autor.id));
-      if (agente && esHoy) {
-        c.r.push([agente.id, fecha.toISOString(),
-          clienteDesde ? Math.max(0, Math.round(o.minutos(fecha, clienteDesde) * 10) / 10) : null]);
-      }
-      clienteDesde = null;
-    });
+  hilosPublicados_(conv).forEach(h => {
+    const fecha = new Date(h.createdAt);
+    if ((h.type === 'customer' || (h.createdBy || {}).type === 'customer') && o.dia(fecha) === o.hoy) {
+      c.cm.push(fecha.toISOString());
+    }
+  });
   return c;
-}
-
-/** Nuevo compacto sobre el anterior: si el nuevo no trae hilos, conserva la actividad del día ya calculada. */
-function fusionarCompacto(previo, nuevo) {
-  if (nuevo.h || !previo || !previo.h) return nuevo;
-  return Object.assign({}, nuevo, { h: true, ev: previo.ev, r: previo.r, cm: previo.cm });
 }
 
 /** ¿Vale la pena guardar este compacto? (abierto y del equipo, sin asignar, o con actividad del equipo hoy) */
 function compactoRelevante(c, esDelEquipo, mostrarSinAsignar) {
   const abierto = c.st === 'active' || c.st === 'pending';
   if (abierto && c.a && esDelEquipo(c.a)) return true;
-  if (abierto && !c.a && mostrarSinAsignar && c.st === 'active') return true;
-  return c.ev.length > 0 || c.r.length > 0;
+  if (abierto && !c.a && mostrarSinAsignar) return true;
+  return c.ev.length > 0;
 }
 
 function promedio_(v) {
@@ -141,27 +137,18 @@ function armarPanelEnVivo(compactos, o) {
       const h = hoy[e[1]];
       if (!h) return;
       if (e[0] === 'PRIMERA_RESPUESTA') { if (e[3] != null) h.primeras.push(e[3]); return; }
-      if (h[e[0]]) h[e[0]].add(c.n);
-      const textos = {
-        ASIGNADO: nombre(e[1]) + ' tomó el #' + c.n,
-        CERRADO: nombre(e[1]) + ' cerró el #' + c.n,
-        REASIGNADO: nombre(e[1]) + ' re-asignó el #' + c.n,
-        NUEVA_CONSULTA: 'Nueva consulta en el #' + c.n + ' (' + nombre(e[1]) + ')',
-      };
-      if (textos[e[0]]) feed.push({ fecha: e[2], tipo: e[0], texto: textos[e[0]], url: url(c) });
-    });
-    c.r.forEach(r => {
-      const h = hoy[r[0]];
-      if (!h) return;
-      h.respuestas++;
-      h.casosRespondidos.add(c.n);
-      if (r[2] != null) h.tiempos.push(r[2]);
-      if (!h.ultimaRespuesta || r[1] > h.ultimaRespuesta) h.ultimaRespuesta = r[1];
-      feed.push({ fecha: r[1], tipo: 'RESPUESTA', texto: nombre(r[0]) + ' respondió el #' + c.n, url: url(c) });
+      if (e[0] === 'RESPUESTA') {
+        h.respuestas++;
+        h.casosRespondidos.add(c.n);
+        if (e[3] != null) h.tiempos.push(e[3]);
+        if (!h.ultimaRespuesta || e[2] > h.ultimaRespuesta) h.ultimaRespuesta = e[2];
+      } else if (h[e[0]]) {
+        h[e[0]].add(c.n);
+      }
+      feed.push({ fecha: e[2], tipo: e[0], agente: nombre(e[1]), numero: c.n, asunto: c.s, minutos: e[3], url: url(c) });
     });
     c.cm.forEach(f => {
-      const quien = c.a && porId[c.a] ? ' (' + nombre(c.a) + ')' : c.a ? '' : ' · sin asignar';
-      feed.push({ fecha: f, tipo: 'CLIENTE', texto: 'El cliente escribió en el #' + c.n + quien, url: url(c) });
+      feed.push({ fecha: f, tipo: 'CLIENTE', agente: c.a && porId[c.a] ? nombre(c.a) : '', numero: c.n, asunto: c.s, minutos: null, url: url(c) });
     });
   });
 
@@ -176,6 +163,8 @@ function armarPanelEnVivo(compactos, o) {
       esperando: esperando,
       seguimiento: suyos.length - esperando.length,
       abiertos: suyos.length,
+      activos: suyos.filter(t => t.estado === 'active').length,
+      pendientes: suyos.filter(t => t.estado === 'pending').length,
       hoy: h ? {
         respuestas: h.respuestas,
         casosRespondidos: h.casosRespondidos.size,
@@ -183,6 +172,7 @@ function armarPanelEnVivo(compactos, o) {
         cerrados: h.CERRADO.size,
         reasignados: h.REASIGNADO.size,
         nuevasConsultas: h.NUEVA_CONSULTA.size,
+        tiemposMedidos: h.tiempos.length,
         promedioRespuestaMin: promedio_(h.tiempos),
         medianaRespuestaMin: mediana_(h.tiempos),
         promedioPrimeraMin: promedio_(h.primeras),
@@ -200,16 +190,42 @@ function armarPanelEnVivo(compactos, o) {
     equipo: {
       esperando: agentes.reduce((s, a) => s + a.esperando.length, 0),
       seguimiento: agentes.reduce((s, a) => s + a.seguimiento, 0),
+      abiertos: agentes.reduce((s, a) => s + a.abiertos, 0),
       respuestas: sumar(h => h.respuestas),
       casosRespondidos: sumar(h => h.casosRespondidos.size),
       asignados: sumar(h => h.ASIGNADO.size),
       cerrados: sumar(h => h.CERRADO.size),
       reasignados: sumar(h => h.REASIGNADO.size),
       nuevasConsultas: sumar(h => h.NUEVA_CONSULTA.size),
+      tiemposMedidos: todos('tiempos').length,
       promedioRespuestaMin: promedio_(todos('tiempos')),
       medianaRespuestaMin: mediana_(todos('tiempos')),
       promedioPrimeraMin: promedio_(todos('primeras')),
     },
     feed: feed.sort((x, y) => (x.fecha < y.fecha ? 1 : x.fecha > y.fecha ? -1 : 0)).slice(0, o.maxFeed || 40),
+  };
+}
+
+/**
+ * Detalle de una agente para auditar sus cifras: cada movimiento del día y sus casos abiertos.
+ * Los totales de la tabla del panel salen exactamente de estas listas.
+ */
+function detalleAgenteEnVivo(compactos, agente) {
+  const url = c => 'https://secure.helpscout.net/conversation/' + c.id + '/' + c.n;
+  const movimientos = [];
+  const abiertos = [];
+  compactos.forEach(c => {
+    if ((c.st === 'active' || c.st === 'pending') && c.a === agente.id) {
+      abiertos.push({ numero: c.n, asunto: c.s, cliente: c.c, estado: c.st, esperaDesde: c.w, url: url(c) });
+    }
+    c.ev.forEach(e => {
+      if (e[1] !== agente.id) return;
+      movimientos.push({ fecha: e[2], tipo: e[0], numero: c.n, asunto: c.s, minutos: e[3], url: url(c) });
+    });
+  });
+  return {
+    agente: agente.nombre,
+    movimientos: movimientos.sort((x, y) => (x.fecha < y.fecha ? 1 : -1)),
+    abiertos: abiertos.sort((x, y) => String(x.esperaDesde || '9').localeCompare(String(y.esperaDesde || '9'))),
   };
 }

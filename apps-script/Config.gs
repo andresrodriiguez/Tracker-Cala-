@@ -82,7 +82,7 @@ const CONFIG = {
     SEGUNDOS_ACTUALIZACION: 5,
     SEGUNDOS_FUERA_DE_HORARIO: 60,
     // Cada cuántos minutos se vuelve a leer todo desde cero (por si algo se escapó).
-    MINUTOS_RECARGA_COMPLETA: 10,
+    MINUTOS_RECARGA_COMPLETA: 5,
     // Meta para responder al cliente: el reloj de cada ticket pasa a amarillo a la mitad y a rojo al llegar.
     META_RESPUESTA_MIN: 60,
     // Estado de cada agente: amarillo / rojo si tiene clientes esperando y no responde hace estos minutos.

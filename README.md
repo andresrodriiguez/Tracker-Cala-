@@ -38,7 +38,7 @@ Reglas importantes:
 ## Hojas nuevas que crea
 
 - **RESUMEN MENSUAL**: por mes y por agente, con una fila de total del EQUIPO. Muestra días trabajados, asignados, nuevas consultas, re-asignados, total, cerrados, **% de resolución**, días en verde, amarillo y rojo, **tiempo promedio de 1ª respuesta**, **tiempo promedio y mediano de resolución**, y **% de casos resueltos dentro de la meta** (por defecto 8 h laborales). Los tiempos se cuentan **solo en horario laboral** (9:00–17:00, lunes a sábado). Las cantidades salen de las hojas mensuales, así que incluye febrero a septiembre aunque se hayan llenado a mano. Los tiempos existen desde que se activa la automatización.
-- **HS_Eventos**: cada asignación, re-asignación, nueva consulta, primera respuesta y cierre, con agente, número de caso, minutos y **enlace directo al caso en Help Scout**. Sirve para auditar y para hacer tablas dinámicas.
+- **HS_Eventos**: cada asignación, re-asignación, nueva consulta, respuesta, primera respuesta y cierre, con agente, número de caso, minutos y **enlace directo al caso en Help Scout**. Sirve para auditar y para hacer tablas dinámicas.
 - **HS_InicioJornada**: la foto diaria de casos sin atender por agente, con la hora, la **lista de números de caso que contó** y, aparte, **cuáles estaban en Pending sin responder** (para revisarlos en Help Scout).
 - **HS_Usuarios**: usuarios y buzones de Help Scout con sus IDs, para revisar la configuración.
 
@@ -81,34 +81,69 @@ Recarga la hoja. Aparece el menú **Help Scout**:
 
 Google pedirá autorizar el script la primera vez. Es normal: se conecta a Help Scout y edita esta hoja.
 
-## 📡 Panel en vivo (página aparte)
+## Panel en vivo (página aparte)
 
-Una página web, aparte de la hoja, que muestra **en tiempo real** cómo va el equipo en Help Scout:
+Una página web, aparte de la hoja, que muestra **en tiempo real** cómo va el equipo en Help Scout. Usa las mismas credenciales,
+agentes, horario y reglas del tracker.
 
-- **Totales del equipo**: clientes esperando respuesta, el cliente que **más lleva esperando** (reloj que corre segundo a segundo), respuestas y cerrados de hoy, tiempo promedio de respuesta y cola **sin asignar**.
-- **Una tarjeta por agente**: cuántos clientes la esperan y con cuántos está en seguimiento, el reloj de su cliente más antiguo, asignados, respuestas, cerrados y re-asignados de hoy, tiempo promedio de respuesta y de 1ª respuesta, y **hace cuánto respondió por última vez**. El estado se pinta solo: *Respondiendo* / *Sin responder hace X min* (amarillo a los 10 min, rojo a los 30, si tiene clientes esperando) / *Al día*.
-- **Tabla de clientes esperando**, del que más espera al más reciente, con su reloj en verde, amarillo o rojo según la meta (60 min) y enlace directo al caso. Se filtra por agente.
-- **Lo que va pasando**: cada respuesta, mensaje del cliente, asignación, cierre y re-asignación del día.
+**Qué muestra**
+- **Indicadores del equipo**: clientes esperando, mayor espera (reloj que corre cada segundo), respuestas y cerrados de la jornada, tiempo de respuesta y cola sin asignar.
+- **Tabla de agentes**: clientes esperando, mayor espera, casos en seguimiento y abiertos; asignados, respuestas, casos respondidos, cerrados y re-asignados de la jornada; tiempo promedio de respuesta y de 1ª respuesta; hace cuánto respondió por última vez; y un estado (*Respondiendo*, *Sin responder X min*, *Al día*).
+- **Detalle** de cada agente: la lista de casos abiertos y de cada movimiento del día, con enlace a Help Scout. **Cada cifra de la tabla sale de esas listas**, así que se puede comprobar caso por caso.
+- **Clientes esperando respuesta**: del que más espera al más reciente, con reloj y barra hacia la meta (60 min), filtrable por agente.
+- **Registro de actividad**: cada respuesta, mensaje del cliente, asignación, cierre y re-asignación.
+- **Exportar métricas**: ver más abajo.
 
-Usa las mismas credenciales, agentes, horario y reglas del tracker. Los conteos del día siguen las mismas reglas que la hoja
-(día de jornada, cierres automáticos no cuentan, etc.). Los tiempos de respuesta se miden desde el **primer** mensaje del cliente
-sin contestar hasta la respuesta de la agente, en horario laboral. Los relojes de espera corren en tiempo real.
+**Cómo se calcula cada cosa**
 
-**Cómo se actualiza**: la página consulta Help Scout **cada 5 segundos** en horario laboral (cada 60 s fuera de él). Cada consulta pide
-solo lo que cambió desde la anterior (normalmente 1 llamada a la API), y cada 10 minutos se vuelve a leer todo desde cero.
-Se ajusta en `CONFIG.PANEL`.
+| Dato | Regla |
+|---|---|
+| **Cliente esperando** | El caso está *Active* o *Pending* y el último mensaje es del cliente: nadie de Help Scout le ha contestado después. Notas internas, asignaciones y cambios de estado **no** cuentan como respuesta. Se calcula leyendo el historial de mensajes del caso. |
+| **Reloj de espera** | Tiempo real desde el **primer** mensaje del cliente que sigue sin contestar. |
+| **En seguimiento** | Caso abierto donde el último mensaje es de la agente (espera al cliente). *Esperando + En seguimiento = Abiertos*. |
+| **Respuestas** | Cada mensaje que la agente envió a un cliente en la jornada. |
+| **T. respuesta** | Minutos **laborales** desde el primer mensaje sin contestar hasta la respuesta. Solo entra al promedio cuando había un mensaje del cliente esperando. |
+| **Asignados, cerrados, re-asignados, 1ª respuesta** | Las mismas reglas del tracker (día de jornada, cierres automáticos no cuentan, etc.). |
+| **Estado de la agente** | Si tiene clientes esperando: verde si respondió hace menos de 10 min, amarillo hasta 30, rojo después. |
+
+**Cómo se actualiza**: cada **5 segundos** en horario laboral (cada 60 s fuera de él) pide a Help Scout lo que cambió. Cada 5 minutos
+vuelve a leer todo desde cero y **compara sus totales con los que informa Help Scout**; si no cuadran, aparece un aviso en rojo.
+El pie de página dice la hora de la última verificación. Se ajusta en `CONFIG.PANEL`.
 
 ### Publicarlo (una vez, ~3 min)
 1. Pega el `dist/Codigo.gs` nuevo y el `appsscript.json` nuevo (pasos 3.2 y 3.3 de la instalación) y guarda.
 2. En el editor de Apps Script: **Implementar → Nueva implementación** → ⚙️ **Aplicación web**.
 3. *Ejecutar como*: **Yo** · *Quién tiene acceso*: **Solo yo** → **Implementar**. Autoriza si lo pide.
-4. Copia la **URL de la aplicación web** y guárdala en favoritos. También aparece en la hoja: **Help Scout → 📡 Panel en vivo**.
+4. Copia la **URL de la aplicación web** y guárdala en favoritos. También está en la hoja: **Help Scout → Panel en vivo** (ahí mismo se puede abrir dentro de la hoja).
 
 > Cuando actualices el código, el panel no cambia hasta que hagas **Implementar → Gestionar implementaciones → ✏️ → Versión: Nueva versión → Implementar** (la URL se mantiene).
 
-**Límites**: con la página abierta en horario laboral son ~720 consultas por hora a Help Scout (muy por debajo de su límite) y a
-Google (UrlFetch: 20.000 al día en cuentas gratuitas, 100.000 en Google Workspace). Si la dejas abierta las 24 h en una cuenta
-gratuita, sube `SEGUNDOS_ACTUALIZACION` a 10. Si `MAILBOXES_EQUIPO` está vacío, la cola "sin asignar" incluye todos los buzones que ve la app.
+### Comprobar que las cifras son correctas
+**Help Scout → Verificar panel contra Help Scout** crea la hoja `HS_VerificacionPanel` con:
+- por agente, los casos *Active* y *Pending* que informa Help Scout frente a los abiertos del panel (deben coincidir);
+- la lista de casos que el panel considera "cliente esperando", con enlace, para abrirlos y confirmar que el último mensaje es del cliente;
+- los mensajes de hoy agrupados por origen, para detectar si Help Scout envía respuestas automáticas (workflows) que no deberían contar como respuesta de una agente.
+
+Hazlo la primera vez que publiques el panel.
+
+### Exportar métricas
+Botón **Exportar métricas** del panel. Filtros: **periodo** (hoy, ayer, esta semana, semana pasada, este mes, mes pasado, todo o fechas a mano),
+**agentes** y **tipos de movimiento**. Tiene vista previa y descarga en **Excel** (4 hojas) o **CSV**:
+
+| Hoja | Contenido |
+|---|---|
+| **Resumen por agente** | Días con actividad, asignados, nuevas consultas, re-asignados, total, cerrados, % resolución, días en verde/amarillo/rojo, respuestas, casos respondidos, respuestas por día, tiempo de respuesta (promedio, mediana, P90, máximo, % en meta), 1ª respuesta y resolución (promedio, mediana, P90, % en meta), más la fila del equipo. |
+| **Por día** | Lo mismo por día y agente, con las mismas columnas del tracker (sin atender, total, pendientes, semáforo). |
+| **Detalle** | Cada movimiento con fecha y hora, agente, número de caso, asunto, minutos y enlace a Help Scout. |
+| **Notas** | Filtros usados, hora de la última sincronización y la definición de cada métrica. |
+
+Sale de la hoja `HS_Eventos` (la que alimenta el tracker), así que las cantidades por día **coinciden con las hojas mensuales** y llega
+hasta la última sincronización (cada 15 min). Las **respuestas individuales** se registran desde que se instala esta versión; para tenerlas
+de días anteriores usa una vez **Help Scout → Completar historial de respuestas** (no borra nada; tarda varias sincronizaciones).
+
+**Límites**: con la página abierta en horario laboral son ~720 consultas por hora a Help Scout y a Google (UrlFetch: 20.000 al día en
+cuentas gratuitas, 100.000 en Google Workspace). Si la dejas abierta las 24 h en una cuenta gratuita, sube `SEGUNDOS_ACTUALIZACION` a 10.
+Si `MAILBOXES_EQUIPO` está vacío, la cola "sin asignar" incluye todos los buzones que ve la app.
 
 ## ¿Cómo pasan los casos a CCH / COACH?
 
@@ -132,7 +167,7 @@ Según cómo lo hagan en Help Scout, ajusta `Config.gs`:
 
 El código fuente está separado por archivos en [`apps-script/`](apps-script). `dist/Codigo.gs` se genera a partir de ellos,
 así que después de cualquier cambio hay que regenerarlo. La lógica que interpreta el historial de Help Scout
-(`Eventos.gs`, `Metricas.gs`, `Util.gs`, `EnVivo.gs`) es JavaScript puro y tiene pruebas. La página del panel es `Panel.html`
+(`Eventos.gs`, `Metricas.gs`, `Util.gs`, `EnVivo.gs`, `Reporte.gs`) es JavaScript puro y tiene pruebas. La página del panel es `Panel.html`
 (ábrela directo en el navegador para verla con datos de ejemplo); el build la incluye dentro de `dist/Codigo.gs`:
 
 ```bash
