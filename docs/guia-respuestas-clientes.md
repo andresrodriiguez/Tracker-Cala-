@@ -212,8 +212,11 @@ Te recomendamos llegar con un poco de anticipación y llevar tu código QR.
 
 **Criterio general** (confírmalo con tu líder en casos especiales):
 
-- **Eventos presenciales y programas:** no hay reembolso en dinero. Ofrecemos **dejar lo pagado como
-  crédito** para otra experiencia con Ismael Cala.
+- **Eventos presenciales y programas:** no hay reembolso en dinero.
+- **Créditos:** dejar lo pagado como crédito para otra experiencia con Ismael Cala **siempre tiene que
+  aprobarlo un líder (Gladis o Daniela)**. No le ofrezcas un crédito al cliente sin esa aprobación.
+  Mientras lo consultas, respóndele: "Ya estamos revisando tu caso con nuestro equipo para ver qué
+  opciones podemos ofrecerte. En cuanto tengamos una respuesta, te escribimos".
 - **Next Level Transformation:** tiene **Garantía de Satisfacción de 90 días**, que aplica si el alumno
   completa el programa (contenido, mentorías y ejercicios) y envía una carta con su proceso.
 - **Cancelar cuotas:** necesitamos **confirmación del cliente** y avisarle que la cancelación puede tardar
@@ -221,7 +224,7 @@ Te recomendamos llegar con un poco de anticipación y llevar tu código QR.
 - **Cobros duplicados o que no reconocemos:** revisa Hotmart, Stripe y el CRM, y pásalo a finanzas con
   todos los datos.
 
-**Cómo decir que no, con cariño:**
+**Cómo decir que no, con cariño (solo cuando el líder ya aprobó el crédito):**
 
 ```
 Entendemos perfectamente tu situación, y queremos acompañarte de la mejor manera.
@@ -258,7 +261,7 @@ para lo que necesites.
 
 | Situación | A quién |
 |---|---|
-| Reembolsos, excepciones, créditos especiales, cambios de evento | Líder (Gladis / Daniela) |
+| Reembolsos, **créditos (siempre)**, excepciones, cambios de evento | Líder (Gladis / Daniela) |
 | Cobros que no encontramos, cancelación de cuotas, reembolsos aprobados | Finanzas |
 | Contenido faltante, certificados, materiales de un programa | Equipo académico / coach del programa |
 | Sedes, horarios, QR, entradas | Equipo de eventos |
