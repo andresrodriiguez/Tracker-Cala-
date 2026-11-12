@@ -7,6 +7,8 @@ function onOpen() {
     .addItem('2. Ver usuarios y buzones de Help Scout', 'menuListarUsuarios')
     .addItem('3. Activar sincronización automática', 'menuActivar')
     .addSeparator()
+    .addItem('📡 Panel en vivo', 'menuPanelEnVivo')
+    .addSeparator()
     .addItem('Sincronizar ahora', 'menuSincronizar')
     .addItem('Tomar foto de inicio de jornada ahora', 'menuFoto')
     .addItem('Actualizar resumen mensual', 'menuResumen')

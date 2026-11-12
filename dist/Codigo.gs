@@ -80,6 +80,23 @@ const CONFIG = {
     ESCRIBIR_CEROS: false,
   },
 
+  // --- Panel en vivo (página web aparte: ver README, "Panel en vivo") ---
+  PANEL: {
+    // Cada cuántos segundos la página consulta Help Scout (en horario laboral y fuera de él).
+    SEGUNDOS_ACTUALIZACION: 5,
+    SEGUNDOS_FUERA_DE_HORARIO: 60,
+    // Cada cuántos minutos se vuelve a leer todo desde cero (por si algo se escapó).
+    MINUTOS_RECARGA_COMPLETA: 10,
+    // Meta para responder al cliente: el reloj de cada ticket pasa a amarillo a la mitad y a rojo al llegar.
+    META_RESPUESTA_MIN: 60,
+    // Estado de cada agente: amarillo / rojo si tiene clientes esperando y no responde hace estos minutos.
+    ALERTA_SIN_RESPONDER_MIN: [10, 30],
+    // Mostrar la cola de casos activos sin asignar (de los buzones de MAILBOXES_EQUIPO, o de todos si está vacío).
+    MOSTRAR_SIN_ASIGNAR: true,
+    MAX_PAGINAS_SIN_ASIGNAR: 4, // 25 casos por página
+    MAX_PAGINAS_DIA: 30,
+  },
+
   // Hojas que crea el script.
   HOJAS: {
     eventos: 'HS_Eventos',
@@ -199,6 +216,18 @@ function mesDesdeNombreHoja(nombre) {
   if (!m) return null;
   const mes = MESES.findIndex(n => normalizarTexto(n) === m[1]);
   return mes < 0 ? null : { anio: Number(m[2]), mes: mes + 1 };
+}
+
+/**
+ * Momento (hora local 'yyyy-MM-dd HH:mm:ss') desde el que los movimientos cuentan para el día de
+ * jornada `dia`: el cierre de la jornada laboral anterior.
+ * Ej. (9–17, lun–sáb): miércoles → martes 17:00:00; lunes → sábado 17:00:00.
+ */
+function inicioVentanaJornada(dia, horario) {
+  const DIA = 86400000;
+  let d = new Date(dia + 'T00:00:00Z').getTime() - DIA;
+  for (let i = 0; i < 7 && horario.dias.indexOf(new Date(d).getUTCDay()) < 0; i++) d -= DIA;
+  return new Date(d).toISOString().slice(0, 10) + ' ' + String(horario.fin).padStart(2, '0') + ':00:00';
 }
 
 // ===== Eventos.gs =====
@@ -455,6 +484,223 @@ function estadisticasTiempo(minutos, metaHoras) {
   };
 }
 
+// ===== EnVivo.gs =====
+/**
+ * Panel en vivo — cálculo puro (sin servicios de Apps Script), se prueba con Node en tests/.
+ *
+ * Cada conversación de Help Scout se resume en un objeto pequeño ("compacto") con lo que el panel
+ * necesita: si el cliente está esperando y desde cuándo, a quién está asignada y lo que pasó en el
+ * día de jornada actual (respuestas de cada agente con su tiempo de respuesta, asignaciones,
+ * cierres, re-asignaciones...). El panel se arma juntando todos los compactos.
+ */
+
+const TIPOS_MENSAJE_ = ['message', 'chat', 'phone'];
+
+/** true si el cliente está esperando respuesta (su mensaje es el último). */
+function clienteEsperando(conv) {
+  if (conv.status === 'closed' || conv.status === 'spam') return false;
+  const espera = conv.customerWaitingSince || {};
+  const ultimo = espera.latestReplyFrom || conv.latestReplyFrom;
+  if (ultimo) return ultimo === 'customer';
+  return conv.status === 'active';
+}
+
+/**
+ * Conversación de la API v2 de Help Scout → compacto.
+ * Si la conversación trae sus hilos (_embedded.threads) se calcula también la actividad del día.
+ * @param {Object} o  { agentePorId, dia(Date)→'yyyy-MM-dd', hoy, minutos(fin, inicio), ctxEventos }
+ */
+function resumirConversacion(conv, o) {
+  const espera = conv.customerWaitingSince || {};
+  const cliente = conv.primaryCustomer || {};
+  const nombreCliente = [cliente.first, cliente.last].filter(Boolean).join(' ') ||
+    [cliente.firstName, cliente.lastName].filter(Boolean).join(' ') || cliente.email || '';
+  const asignado = conv.assignee && Number(conv.assignee.id) > 0 ? Number(conv.assignee.id) : null;
+  const esperando = clienteEsperando(conv);
+  const c = {
+    id: conv.id,
+    n: conv.number,
+    s: String(conv.subject || '(sin asunto)').slice(0, 140),
+    c: String(nombreCliente).slice(0, 60),
+    st: conv.status,
+    a: asignado,
+    mb: conv.mailboxId || null,
+    w: esperando ? (espera.time || conv.userUpdatedAt || conv.createdAt || null) : null,
+    h: false, // trae la actividad del día (hilos)
+    ev: [],   // [tipo, agenteId, fechaIso, minutos]
+    r: [],    // respuestas de agentes del equipo hoy: [agenteId, fechaIso, minutosDeRespuesta|null]
+    cm: [],   // mensajes del cliente hoy: [fechaIso]
+  };
+
+  const hilos = conv._embedded && conv._embedded.threads;
+  if (!hilos) return c;
+  c.h = true;
+
+  derivarEventos(conv, o.ctxEventos).forEach(ev => {
+    if (ev.dia === o.hoy) c.ev.push([ev.tipo, ev.agenteId, ev.fecha.toISOString(), ev.minutos]);
+  });
+
+  let clienteDesde = null;
+  hilos
+    .filter(t => !t.state || t.state === 'published')
+    .slice()
+    .sort((x, y) => (new Date(x.createdAt) - new Date(y.createdAt)) || (x.id - y.id))
+    .forEach(t => {
+      const autor = t.createdBy || {};
+      const fecha = new Date(t.createdAt);
+      const esHoy = o.dia(fecha) === o.hoy;
+      if (t.type === 'customer' || autor.type === 'customer') {
+        if (!clienteDesde) clienteDesde = fecha;
+        if (esHoy) c.cm.push(fecha.toISOString());
+        return;
+      }
+      if (autor.type !== 'user' || TIPOS_MENSAJE_.indexOf(t.type) < 0) return;
+      const agente = o.agentePorId(Number(autor.id));
+      if (agente && esHoy) {
+        c.r.push([agente.id, fecha.toISOString(),
+          clienteDesde ? Math.max(0, Math.round(o.minutos(fecha, clienteDesde) * 10) / 10) : null]);
+      }
+      clienteDesde = null;
+    });
+  return c;
+}
+
+/** Nuevo compacto sobre el anterior: si el nuevo no trae hilos, conserva la actividad del día ya calculada. */
+function fusionarCompacto(previo, nuevo) {
+  if (nuevo.h || !previo || !previo.h) return nuevo;
+  return Object.assign({}, nuevo, { h: true, ev: previo.ev, r: previo.r, cm: previo.cm });
+}
+
+/** ¿Vale la pena guardar este compacto? (abierto y del equipo, sin asignar, o con actividad del equipo hoy) */
+function compactoRelevante(c, esDelEquipo, mostrarSinAsignar) {
+  const abierto = c.st === 'active' || c.st === 'pending';
+  if (abierto && c.a && esDelEquipo(c.a)) return true;
+  if (abierto && !c.a && mostrarSinAsignar && c.st === 'active') return true;
+  return c.ev.length > 0 || c.r.length > 0;
+}
+
+function promedio_(v) {
+  return v.length ? Math.round(v.reduce((s, x) => s + x, 0) / v.length * 10) / 10 : null;
+}
+
+function mediana_(v) {
+  if (!v.length) return null;
+  const o = v.slice().sort((a, b) => a - b);
+  const m = Math.floor(o.length / 2);
+  return Math.round((o.length % 2 ? o[m] : (o[m - 1] + o[m]) / 2) * 10) / 10;
+}
+
+/**
+ * Junta los compactos y arma lo que muestra el panel.
+ * @param {Object[]} compactos
+ * @param {Object} o  { agentes: [{nombre, id}], nombreBuzon(id)?, mostrarSinAsignar, maxFeed }
+ */
+function armarPanelEnVivo(compactos, o) {
+  const porId = {};
+  o.agentes.forEach(a => { if (a.id) porId[a.id] = a; });
+  const nombre = id => (porId[id] ? porId[id].nombre : '');
+  const url = c => 'https://secure.helpscout.net/conversation/' + c.id + '/' + c.n;
+  const ticket = c => ({
+    id: c.id, numero: c.n, asunto: c.s, cliente: c.c, estado: c.st, esperaDesde: c.w,
+    agenteId: c.a && porId[c.a] ? c.a : null, agente: nombre(c.a),
+    buzon: o.nombreBuzon ? o.nombreBuzon(c.mb) : '', url: url(c),
+  });
+  const porEspera = (x, y) => String(x.esperaDesde || '9').localeCompare(String(y.esperaDesde || '9'));
+
+  const hoy = {};
+  o.agentes.forEach(a => {
+    if (!a.id) return;
+    hoy[a.id] = {
+      respuestas: 0, casosRespondidos: new Set(), tiempos: [], primeras: [], ultimaRespuesta: null,
+      ASIGNADO: new Set(), CERRADO: new Set(), REASIGNADO: new Set(), NUEVA_CONSULTA: new Set(),
+    };
+  });
+  const feed = [];
+  const abiertos = [];
+  const sinAsignar = [];
+
+  compactos.forEach(c => {
+    const abierto = c.st === 'active' || c.st === 'pending';
+    if (abierto && c.a && porId[c.a]) abiertos.push(ticket(c));
+    if (abierto && !c.a && o.mostrarSinAsignar !== false && c.w) sinAsignar.push(ticket(c));
+
+    c.ev.forEach(e => {
+      const h = hoy[e[1]];
+      if (!h) return;
+      if (e[0] === 'PRIMERA_RESPUESTA') { if (e[3] != null) h.primeras.push(e[3]); return; }
+      if (h[e[0]]) h[e[0]].add(c.n);
+      const textos = {
+        ASIGNADO: nombre(e[1]) + ' tomó el #' + c.n,
+        CERRADO: nombre(e[1]) + ' cerró el #' + c.n,
+        REASIGNADO: nombre(e[1]) + ' re-asignó el #' + c.n,
+        NUEVA_CONSULTA: 'Nueva consulta en el #' + c.n + ' (' + nombre(e[1]) + ')',
+      };
+      if (textos[e[0]]) feed.push({ fecha: e[2], tipo: e[0], texto: textos[e[0]], url: url(c) });
+    });
+    c.r.forEach(r => {
+      const h = hoy[r[0]];
+      if (!h) return;
+      h.respuestas++;
+      h.casosRespondidos.add(c.n);
+      if (r[2] != null) h.tiempos.push(r[2]);
+      if (!h.ultimaRespuesta || r[1] > h.ultimaRespuesta) h.ultimaRespuesta = r[1];
+      feed.push({ fecha: r[1], tipo: 'RESPUESTA', texto: nombre(r[0]) + ' respondió el #' + c.n, url: url(c) });
+    });
+    c.cm.forEach(f => {
+      const quien = c.a && porId[c.a] ? ' (' + nombre(c.a) + ')' : c.a ? '' : ' · sin asignar';
+      feed.push({ fecha: f, tipo: 'CLIENTE', texto: 'El cliente escribió en el #' + c.n + quien, url: url(c) });
+    });
+  });
+
+  const agentes = o.agentes.map(a => {
+    const suyos = abiertos.filter(t => t.agenteId === a.id);
+    const esperando = suyos.filter(t => t.esperaDesde).sort(porEspera);
+    const h = hoy[a.id];
+    return {
+      nombre: a.nombre,
+      id: a.id,
+      vinculado: !!a.id,
+      esperando: esperando,
+      seguimiento: suyos.length - esperando.length,
+      abiertos: suyos.length,
+      hoy: h ? {
+        respuestas: h.respuestas,
+        casosRespondidos: h.casosRespondidos.size,
+        asignados: h.ASIGNADO.size,
+        cerrados: h.CERRADO.size,
+        reasignados: h.REASIGNADO.size,
+        nuevasConsultas: h.NUEVA_CONSULTA.size,
+        promedioRespuestaMin: promedio_(h.tiempos),
+        medianaRespuestaMin: mediana_(h.tiempos),
+        promedioPrimeraMin: promedio_(h.primeras),
+        ultimaRespuesta: h.ultimaRespuesta,
+      } : null,
+    };
+  });
+
+  const vinculados = Object.keys(hoy).map(k => hoy[k]);
+  const sumar = f => vinculados.reduce((s, h) => s + f(h), 0);
+  const todos = k => vinculados.reduce((v, h) => v.concat(h[k]), []);
+  return {
+    agentes: agentes,
+    sinAsignar: sinAsignar.sort(porEspera),
+    equipo: {
+      esperando: agentes.reduce((s, a) => s + a.esperando.length, 0),
+      seguimiento: agentes.reduce((s, a) => s + a.seguimiento, 0),
+      respuestas: sumar(h => h.respuestas),
+      casosRespondidos: sumar(h => h.casosRespondidos.size),
+      asignados: sumar(h => h.ASIGNADO.size),
+      cerrados: sumar(h => h.CERRADO.size),
+      reasignados: sumar(h => h.REASIGNADO.size),
+      nuevasConsultas: sumar(h => h.NUEVA_CONSULTA.size),
+      promedioRespuestaMin: promedio_(todos('tiempos')),
+      medianaRespuestaMin: mediana_(todos('tiempos')),
+      promedioPrimeraMin: promedio_(todos('primeras')),
+    },
+    feed: feed.sort((x, y) => (x.fecha < y.fecha ? 1 : x.fecha > y.fecha ? -1 : 0)).slice(0, o.maxFeed || 40),
+  };
+}
+
 // ===== HelpScout.gs =====
 /**
  * Cliente mínimo de la API v2 de Help Scout (Mailbox API).
@@ -521,15 +767,18 @@ function hsGet_(ruta, params) {
   throw new Error('Help Scout no respondió después de varios intentos: ' + ruta);
 }
 
-/** Recorre todas las páginas de un listado y devuelve los elementos de _embedded[clave]. */
-function hsListarTodo_(ruta, params, clave) {
+/**
+ * Recorre todas las páginas de un listado y devuelve los elementos de _embedded[clave].
+ * maxPaginas (opcional) corta la lectura después de esa cantidad de páginas.
+ */
+function hsListarTodo_(ruta, params, clave, maxPaginas) {
   const todos = [];
   for (let pagina = 1; ; pagina++) {
     const data = hsGet_(ruta, Object.assign({}, params, { page: pagina }));
     const items = (data._embedded && data._embedded[clave]) || [];
     Array.prototype.push.apply(todos, items);
     const totalPaginas = data.page ? data.page.totalPages : 1;
-    if (!items.length || pagina >= totalPaginas) return todos;
+    if (!items.length || pagina >= totalPaginas || (maxPaginas && pagina >= maxPaginas)) return todos;
   }
 }
 
@@ -1084,6 +1333,237 @@ function nombresDias_(dias) {
     : orden.map(d => nombres[d]).join(', ');
 }
 
+// ===== Panel.gs =====
+/**
+ * Panel en vivo (página web aparte) — se publica como "Aplicación web" desde el editor de Apps Script.
+ *
+ * Cómo se mantiene al día sin pasarse de los límites de Help Scout ni de Google:
+ *  - Recarga completa (al abrir, cada CONFIG.PANEL.MINUTOS_RECARGA_COMPLETA y al cambiar de día):
+ *    casos abiertos de cada agente, cola sin asignar y todo lo movido en el día de jornada.
+ *  - Entre recargas, cada CONFIG.PANEL.SEGUNDOS_ACTUALIZACION: UNA consulta con los casos que
+ *    cambiaron desde la anterior (normalmente 1 llamada a la API).
+ *  - El estado se guarda en la caché del script, así que varias pestañas abiertas comparten datos.
+ *  - Los relojes (cuánto lleva esperando cada cliente) corren cada segundo en el navegador.
+ */
+const CLAVE_ESTADO_PANEL_ = 'PANEL_ESTADO';
+const CLAVE_RESPUESTA_PANEL_ = 'PANEL_RESPUESTA';
+const CLAVE_OCUPADO_PANEL_ = 'PANEL_OCUPADO';
+
+function doGet() {
+  return paginaPanel_()
+    .setTitle('Centro de control · Soporte en vivo')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+function paginaPanel_() {
+  // En dist/Codigo.gs el HTML va incluido como texto (PANEL_HTML); con clasp se usa el archivo Panel.html.
+  return typeof PANEL_HTML !== 'undefined'
+    ? HtmlService.createHtmlOutput(PANEL_HTML)
+    : HtmlService.createHtmlOutputFromFile('Panel');
+}
+
+/** Lo llama la página cada pocos segundos. Devuelve JSON (texto). */
+function datosPanelEnVivo() {
+  const cache = CacheService.getScriptCache();
+  const reciente = cache.get(CLAVE_RESPUESTA_PANEL_);
+  if (reciente) return reciente;
+  // Si otra pestaña ya está consultando Help Scout, se devuelve lo último que hay.
+  if (cache.get(CLAVE_OCUPADO_PANEL_)) {
+    const ultimo = cache.get(CLAVE_RESPUESTA_PANEL_ + '_ULTIMA');
+    if (ultimo) return ultimo;
+  }
+  try {
+    cache.put(CLAVE_OCUPADO_PANEL_, '1', 90);
+    const respuesta = JSON.stringify(calcularRespuestaPanel_());
+    const cfg = CONFIG.PANEL;
+    if (respuesta.length < 45000) { // límite de 100 KB por clave en la caché
+      cache.put(CLAVE_RESPUESTA_PANEL_, respuesta, Math.max(1, cfg.SEGUNDOS_ACTUALIZACION - 1));
+      cache.put(CLAVE_RESPUESTA_PANEL_ + '_ULTIMA', respuesta, 600);
+    }
+    return respuesta;
+  } catch (e) {
+    console.error(e);
+    return JSON.stringify({ ok: false, error: String(e && e.message || e), ahora: new Date().toISOString() });
+  } finally {
+    cache.remove(CLAVE_OCUPADO_PANEL_);
+  }
+}
+
+function calcularRespuestaPanel_() {
+  const cfg = CONFIG.PANEL;
+  const k = contextoPanel_();
+  let estado = leerCacheGrande_(CLAVE_ESTADO_PANEL_);
+  const vencido = !estado || estado.v !== 1 || estado.dia !== k.hoy ||
+    Date.now() - new Date(estado.base).getTime() > cfg.MINUTOS_RECARGA_COMPLETA * 60000;
+  if (vencido) estado = recargaCompletaPanel_(k);
+  else actualizarPanel_(estado, k);
+  guardarCacheGrande_(CLAVE_ESTADO_PANEL_, estado, 3600);
+
+  const buzones = buzonesPorId_();
+  const panel = armarPanelEnVivo(Object.keys(estado.convs).map(id => estado.convs[id]), {
+    agentes: k.equipo.agentes,
+    nombreBuzon: id => buzones[id] || '',
+    mostrarSinAsignar: cfg.MOSTRAR_SIN_ASIGNAR,
+    maxFeed: 40,
+  });
+  const H = CONFIG.HORARIO_LABORAL;
+  const local = relojLocal_(k.ahora, k.tz);
+  const horaLocal = local.getUTCHours() + local.getUTCMinutes() / 60;
+  return {
+    ok: true,
+    ahora: k.ahora.toISOString(),
+    hoy: k.hoy,
+    tz: k.tz,
+    enHorario: H.dias.indexOf(local.getUTCDay()) >= 0 && horaLocal >= H.inicio && horaLocal < H.fin,
+    horario: H,
+    segundos: cfg.SEGUNDOS_ACTUALIZACION,
+    segundosFueraDeHorario: cfg.SEGUNDOS_FUERA_DE_HORARIO,
+    metaRespuestaMin: cfg.META_RESPUESTA_MIN,
+    alertaSinResponderMin: cfg.ALERTA_SIN_RESPONDER_MIN,
+    ultimaRecargaCompleta: estado.base,
+    sinVincular: k.equipo.sinEncontrar,
+    panel: panel,
+  };
+}
+
+function contextoPanel_() {
+  const tz = Session.getScriptTimeZone();
+  const H = CONFIG.HORARIO_LABORAL;
+  const ahora = new Date();
+  const hoy = diaDeJornada(relojLocal_(ahora, tz), H);
+  const equipo = resolverEquipo_();
+  const dia = fecha => diaDeJornada(relojLocal_(fecha, tz), H);
+  const agentePorId = id => equipo.porId[id] || null;
+  const minutos = (fin, inicio) => minutosGestion(relojLocal_(inicio, tz), relojLocal_(fin, tz), H);
+  return {
+    tz: tz,
+    ahora: ahora,
+    hoy: hoy,
+    equipo: equipo,
+    mailbox: CONFIG.MAILBOXES_EQUIPO.length ? CONFIG.MAILBOXES_EQUIPO.join(',') : undefined,
+    o: {
+      agentePorId: agentePorId,
+      dia: dia,
+      hoy: hoy,
+      minutos: minutos,
+      ctxEventos: {
+        agentePorId: agentePorId,
+        dia: dia,
+        mailboxesEquipo: CONFIG.MAILBOXES_EQUIPO,
+        tagsReasignacion: CONFIG.TAGS_REASIGNACION,
+        transferenciaInternaEsReasignacion: CONFIG.TRANSFERENCIA_INTERNA_ES_REASIGNACION,
+        fechaInicio: CONFIG.FECHA_INICIO,
+        minutos: minutos,
+      },
+    },
+  };
+}
+
+/** Guarda (o descarta) una conversación en el estado del panel. */
+function guardarEnPanel_(convs, conv, k) {
+  const c = fusionarCompacto(convs[conv.id], resumirConversacion(conv, k.o));
+  if (compactoRelevante(c, id => !!k.equipo.porId[id], CONFIG.PANEL.MOSTRAR_SIN_ASIGNAR)) convs[c.id] = c;
+  else delete convs[c.id];
+}
+
+function recargaCompletaPanel_(k) {
+  const cfg = CONFIG.PANEL;
+  const inicio = new Date();
+  const convs = {};
+  // 1) Casos abiertos de cada agente.
+  k.equipo.agentes.filter(a => a.id).forEach(a => ['active', 'pending'].forEach(estado =>
+    hsListarTodo_('/conversations', { status: estado, assigned_to: a.id, mailbox: k.mailbox }, 'conversations')
+      .forEach(conv => guardarEnPanel_(convs, conv, k))));
+  // 2) Cola sin asignar.
+  if (cfg.MOSTRAR_SIN_ASIGNAR) {
+    hsListarTodo_('/conversations', { status: 'active', mailbox: k.mailbox }, 'conversations', cfg.MAX_PAGINAS_SIN_ASIGNAR)
+      .filter(conv => !(conv.assignee && Number(conv.assignee.id) > 0))
+      .forEach(conv => guardarEnPanel_(convs, conv, k));
+  }
+  // 3) Todo lo que se movió en el día de jornada (con su historial).
+  const desde = Utilities.parseDate(inicioVentanaJornada(k.hoy, CONFIG.HORARIO_LABORAL), k.tz, 'yyyy-MM-dd HH:mm:ss');
+  conversacionesConHilos_(hsFechaIso_(desde), k.mailbox, cfg.MAX_PAGINAS_DIA)
+    .forEach(conv => guardarEnPanel_(convs, conv, k));
+  return { v: 1, dia: k.hoy, base: inicio.toISOString(), cursor: inicio.toISOString(), convs: convs };
+}
+
+function actualizarPanel_(estado, k) {
+  const inicio = new Date();
+  // 1 minuto de solape: cada conversación se recalcula entera, así que repetirla no duplica nada.
+  const desde = new Date(new Date(estado.cursor).getTime() - 60000);
+  conversacionesConHilos_(hsFechaIso_(desde), k.mailbox, 10)
+    .forEach(conv => guardarEnPanel_(estado.convs, conv, k));
+  estado.cursor = inicio.toISOString();
+}
+
+/** Conversaciones modificadas desde `desde`, con todos sus hilos. */
+function conversacionesConHilos_(desde, mailbox, maxPaginas) {
+  const convs = hsListarTodo_('/conversations', {
+    status: 'all', modifiedSince: desde, sortField: 'modifiedAt', sortOrder: 'desc', embed: 'threads', mailbox: mailbox,
+  }, 'conversations', maxPaginas);
+  convs.forEach(conv => {
+    conv._embedded = conv._embedded || {};
+    const hilos = conv._embedded.threads || [];
+    if (typeof conv.threads === 'number' && conv.threads > hilos.length) conv._embedded.threads = hsHilos_(conv.id);
+  });
+  return convs;
+}
+
+function buzonesPorId_() {
+  const cache = CacheService.getScriptCache();
+  const guardado = cache.get('HS_BUZONES');
+  if (guardado) return JSON.parse(guardado);
+  const mapa = {};
+  try {
+    hsMailboxes_().forEach(m => { mapa[m.id] = m.nombre; });
+  } catch (e) {
+    console.warn('No se pudieron leer los buzones: ' + e);
+  }
+  cache.put('HS_BUZONES', JSON.stringify(mapa), 21600);
+  return mapa;
+}
+
+/** CacheService guarda máx. 100 KB por clave: el estado se parte en trozos. */
+function guardarCacheGrande_(clave, obj, segundos) {
+  const texto = JSON.stringify(obj);
+  const TROZO = 40000; // caracteres (con tildes pueden ser más bytes)
+  const valores = {};
+  let n = 0;
+  for (let i = 0; i < texto.length; i += TROZO) valores[clave + '_' + (n++)] = texto.slice(i, i + TROZO);
+  valores[clave + '_n'] = String(n);
+  CacheService.getScriptCache().putAll(valores, segundos);
+}
+
+function leerCacheGrande_(clave) {
+  const cache = CacheService.getScriptCache();
+  const n = Number(cache.get(clave + '_n'));
+  if (!n) return null;
+  const claves = [];
+  for (let i = 0; i < n; i++) claves.push(clave + '_' + i);
+  const trozos = cache.getAll(claves);
+  if (claves.some(c => trozos[c] == null)) return null;
+  try {
+    return JSON.parse(claves.map(c => trozos[c]).join(''));
+  } catch (e) {
+    return null;
+  }
+}
+
+/** Menú: muestra el enlace del panel (o cómo publicarlo). */
+function menuPanelEnVivo() {
+  let url = '';
+  try { url = ScriptApp.getService().getUrl(); } catch (e) { url = ''; }
+  const html = url
+    ? '<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.5">' +
+      '<p>Tu panel en vivo está en:</p><p><a href="' + url + '" target="_blank" style="font-weight:bold">Abrir panel en vivo ↗</a></p>' +
+      '<p style="color:#555">Guárdalo en favoritos. Si cambiaste el código, ve a <b>Implementar → Gestionar implementaciones → ✏️ → Versión: nueva</b> para que el panel use la versión nueva.</p></div>'
+    : '<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.5">' +
+      '<p>El panel todavía no está publicado. En <b>Extensiones → Apps Script</b>:</p>' +
+      '<ol><li><b>Implementar → Nueva implementación</b></li><li>Tipo: <b>Aplicación web</b></li>' +
+      '<li>Ejecutar como: <b>Yo</b> · Quién tiene acceso: <b>Solo yo</b></li><li><b>Implementar</b> y copia la URL.</li></ol></div>';
+  SpreadsheetApp.getUi().showModalDialog(HtmlService.createHtmlOutput(html).setWidth(460).setHeight(260), 'Panel en vivo');
+}
+
 // ===== Menu.gs =====
 /**
  * Menú "Help Scout" en la hoja y activadores automáticos.
@@ -1093,6 +1573,8 @@ function onOpen() {
     .addItem('1. Configurar credenciales', 'menuConfigurarCredenciales')
     .addItem('2. Ver usuarios y buzones de Help Scout', 'menuListarUsuarios')
     .addItem('3. Activar sincronización automática', 'menuActivar')
+    .addSeparator()
+    .addItem('📡 Panel en vivo', 'menuPanelEnVivo')
     .addSeparator()
     .addItem('Sincronizar ahora', 'menuSincronizar')
     .addItem('Tomar foto de inicio de jornada ahora', 'menuFoto')
@@ -1238,3 +1720,6 @@ function eliminarActivadores_() {
     .filter(t => t.getHandlerFunction() === 'sincronizar')
     .forEach(t => ScriptApp.deleteTrigger(t));
 }
+
+// ===== Panel.html =====
+const PANEL_HTML = "<!DOCTYPE html>\n<html lang=\"es\">\n<head>\n<base target=\"_top\">\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>Centro de control · Soporte en vivo</title>\n<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>\n<link href=\"https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap\" rel=\"stylesheet\">\n<style>\n:root {\n  --bg: #0A0D13;\n  --panel: #10151E;\n  --panel-2: #151B26;\n  --panel-3: #1B2230;\n  --line: #222B3A;\n  --line-2: #2C3648;\n  --ink: #EEF1F6;\n  --muted: #8F9AAE;\n  --accent: #7C93FF;\n  --accent-ink: #0A0D13;\n  --ok: #3ED598;\n  --ok-bg: rgba(62, 213, 152, .12);\n  --warn: #F7C04A;\n  --warn-bg: rgba(247, 192, 74, .13);\n  --late: #FF7A7A;\n  --late-bg: rgba(255, 122, 122, .14);\n  --radius: 16px;\n}\n* { box-sizing: border-box; }\nhtml, body { margin: 0; background: var(--bg); color: var(--ink); }\nbody {\n  font-family: 'Montserrat', system-ui, sans-serif; font-size: 14px; line-height: 1.45;\n  font-feature-settings: 'tnum' 1, 'lnum' 1; -webkit-font-smoothing: antialiased;\n}\na { color: inherit; text-decoration: none; }\na:hover { color: var(--accent); }\nbutton { font: inherit; color: inherit; }\n.wrap { max-width: 1600px; margin: 0 auto; padding: 0 24px 40px; }\n\n/* Barra superior */\n.top { position: sticky; top: 0; z-index: 5; background: rgba(10, 13, 19, .92); backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }\n.top-in { max-width: 1600px; margin: 0 auto; padding: 14px 24px; display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }\n.brand { display: flex; align-items: center; gap: 12px; margin-right: auto; }\n.mark { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; background: linear-gradient(145deg, #2A3A7A, #1A2246); border: 1px solid #34437F; }\n.brand h1 { margin: 0; font-size: 17px; font-weight: 700; letter-spacing: -.01em; }\n.brand p { margin: 0; font-size: 12px; color: var(--muted); font-weight: 500; }\n.pill { display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 12px; border-radius: 999px; font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }\n.pill .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }\n.pill.vivo { color: var(--ok); background: var(--ok-bg); }\n.pill.vivo .dot { animation: pulso 1.6s ease-out infinite; }\n.pill.pausa, .pill.fuera { color: var(--warn); background: var(--warn-bg); }\n.pill.error { color: var(--late); background: var(--late-bg); }\n.pill.cargando { color: var(--muted); background: var(--panel-3); }\n@keyframes pulso { 0% { box-shadow: 0 0 0 0 rgba(62, 213, 152, .55); } 100% { box-shadow: 0 0 0 9px rgba(62, 213, 152, 0); } }\n.clock { display: flex; flex-direction: column; align-items: flex-end; }\n.clock b { font-size: 22px; font-weight: 700; letter-spacing: .02em; }\n.clock span { font-size: 12px; color: var(--muted); font-weight: 500; }\n.btn { height: 40px; padding: 0 14px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--panel-2); font-weight: 600; font-size: 13px; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; }\n.btn:hover { border-color: var(--accent); }\n.btn:focus-visible, .card:focus-visible, .chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }\n.progreso { height: 2px; background: transparent; }\n.progreso i { display: block; height: 100%; width: 0; background: var(--accent); transition: width 1s linear; }\n\n.aviso { margin-top: 18px; padding: 12px 16px; border-radius: 12px; font-weight: 500; font-size: 13px; border: 1px solid; }\n.aviso.error { color: var(--late); background: var(--late-bg); border-color: rgba(255, 122, 122, .35); }\n.aviso.info { color: var(--warn); background: var(--warn-bg); border-color: rgba(247, 192, 74, .35); }\n\n.titulo { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 28px 0 12px; }\n.titulo h2 { margin: 0; font-size: 13px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }\n.titulo span { font-size: 12px; color: var(--muted); }\n\n/* KPI */\n.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-top: 24px; }\n.kpi { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }\n.kpi .l { font-size: 12px; font-weight: 600; color: var(--muted); }\n.kpi .v { font-size: clamp(24px, 2.1vw, 34px); font-weight: 800; letter-spacing: -.03em; line-height: 1.15; white-space: nowrap; }\n.kpi .n { font-size: 12px; color: var(--muted); font-weight: 500; }\n.kpi.destacado { background: linear-gradient(160deg, #161E31, var(--panel)); border-color: #2B3756; }\n\n/* Agentes */\n.agentes { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }\n.card { text-align: left; cursor: pointer; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; display: flex; flex-direction: column; gap: 16px; min-width: 0; transition: border-color .15s, transform .15s; }\n.card:hover { border-color: var(--line-2); transform: translateY(-1px); }\n.card.activa { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }\n.card.sin-vincular { opacity: .6; cursor: default; }\n.cab { display: flex; align-items: center; gap: 12px; }\n.avatar { width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 14px; background: var(--panel-3); border: 1px solid var(--line-2); flex: none; }\n.cab .nom { font-weight: 700; font-size: 15px; display: block; }\n.estado { display: inline-flex; align-items: center; gap: 6px; margin-top: 4px; padding: 3px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 700; }\n.estado::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }\n.t-ok { color: var(--ok); background: var(--ok-bg); }\n.t-warn { color: var(--warn); background: var(--warn-bg); }\n.t-late { color: var(--late); background: var(--late-bg); }\n.t-neutro { color: var(--muted); background: var(--panel-3); }\n.duo { display: grid; grid-template-columns: 1fr 1.25fr; gap: 10px; }\n.caja { border-radius: 12px; padding: 11px 13px; background: var(--panel-2); display: flex; flex-direction: column; gap: 2px; min-width: 0; }\n.caja .l { font-size: 11.5px; font-weight: 600; color: var(--muted); }\n.caja .v { font-size: 30px; font-weight: 800; letter-spacing: -.03em; line-height: 1.15; }\n.caja .r { font-size: 20px; font-weight: 700; padding-top: 6px; white-space: nowrap; }\n.caja.t-ok, .caja.t-warn, .caja.t-late { background: none; }\n.caja.t-ok { background: var(--ok-bg); } .caja.t-warn { background: var(--warn-bg); } .caja.t-late { background: var(--late-bg); }\n.caja.t-ok .l, .caja.t-warn .l, .caja.t-late .l { color: var(--muted); }\n.metricas { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px 8px; }\n.metricas div { display: flex; flex-direction: column; min-width: 0; }\n.metricas .l { font-size: 11px; color: var(--muted); font-weight: 600; }\n.metricas .v { font-size: 17px; font-weight: 700; }\n.pie { font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 12px; font-weight: 500; }\n.pie b { color: var(--ink); font-weight: 700; }\n\n/* Tabla + feed */\n.doble { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; margin-top: 28px; }\n.bloque { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; min-width: 0; }\n.bloque.tabla { flex: 999 1 680px; }\n.bloque.feed { flex: 1 1 340px; }\n.bloque h3 { margin: 0; font-size: 15px; font-weight: 700; }\n.bloque .sub { font-size: 12px; color: var(--muted); font-weight: 500; }\n.bloque-cab { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }\n.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }\n.chip { height: 34px; padding: 0 13px; border-radius: 999px; border: 1px solid var(--line-2); background: var(--panel-2); font-size: 12.5px; font-weight: 600; cursor: pointer; }\n.chip:hover { border-color: var(--accent); }\n.chip.activa { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }\n.scroll { overflow-x: auto; }\ntable { width: 100%; border-collapse: collapse; min-width: 720px; }\nth { text-align: left; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 0 12px 10px; border-bottom: 1px solid var(--line); }\ntd { padding: 11px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }\ntr:last-child td { border-bottom: 0; }\ntbody tr:hover td { background: var(--panel-2); }\n.reloj-t { display: inline-block; min-width: 104px; padding: 5px 9px; border-radius: 8px; font-weight: 700; font-size: 13px; text-align: center; white-space: nowrap; }\n.num { font-weight: 700; }\n.num a { display: inline-flex; align-items: center; gap: 4px; }\n.asunto { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n.tenue { color: var(--muted); }\n.vacio { padding: 26px 12px; text-align: center; color: var(--muted); font-weight: 500; }\n.feed ol { list-style: none; margin: 0; padding: 0; max-height: 640px; overflow-y: auto; }\n.feed li { display: flex; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }\n.feed li:last-child { border-bottom: 0; }\n.feed .ic { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; flex: none; }\n.feed .tx { font-size: 13px; font-weight: 500; }\n.feed .hr { font-size: 11.5px; color: var(--muted); }\nfooter { margin-top: 28px; font-size: 12px; color: var(--muted); display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }\n.esqueleto { color: var(--muted); padding: 60px 0; text-align: center; font-weight: 500; }\n\n@media (max-width: 640px) {\n  .wrap, .top-in { padding-left: 16px; padding-right: 16px; }\n  .clock { align-items: flex-start; }\n  .kpi .v { font-size: 28px; }\n}\n</style>\n</head>\n<body>\n<div class=\"top\">\n  <div class=\"top-in\">\n    <div class=\"brand\">\n      <div class=\"mark\" aria-hidden=\"true\">\n        <svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#B9C6FF\" stroke-width=\"2.2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M3 12h4l3-8 4 16 3-8h4\"/></svg>\n      </div>\n      <div>\n        <h1>Centro de control · Soporte</h1>\n        <p>Help Scout en tiempo real</p>\n      </div>\n    </div>\n    <span id=\"estadoConexion\" class=\"pill cargando\"><span class=\"dot\"></span><span>Conectando</span></span>\n    <div class=\"clock\"><b id=\"reloj\">--:--:--</b><span id=\"actualizado\">Cargando datos…</span></div>\n    <button type=\"button\" class=\"btn\" id=\"btnPausa\" aria-pressed=\"false\">\n      <svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.4\" stroke-linecap=\"round\" aria-hidden=\"true\"><path d=\"M8 5v14M16 5v14\"/></svg>\n      <span>Pausar</span>\n    </button>\n    <button type=\"button\" class=\"btn\" id=\"btnPantalla\" hidden>\n      <svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5\"/></svg>\n      <span>Pantalla completa</span>\n    </button>\n  </div>\n  <div class=\"progreso\"><i id=\"barra\"></i></div>\n</div>\n\n<main class=\"wrap\">\n  <div id=\"avisos\"></div>\n  <div id=\"contenido\"><div class=\"esqueleto\">Leyendo Help Scout… la primera carga puede tardar unos segundos.</div></div>\n</main>\n\n<script>\n(function () {\n  'use strict';\n  var datos = null;          // última respuesta del servidor\n  var desfase = 0;           // reloj del servidor − reloj del navegador\n  var filtro = 'todos';\n  var pausado = false;\n  var enCurso = false;\n  var ultimaOk = 0;\n  var proxima = 0;\n  var temporizador = null;\n  var demo = typeof google === 'undefined' || !google.script || !google.script.run;\n\n  var $ = function (id) { return document.getElementById(id); };\n  var ahora = function () { return Date.now() + desfase; };\n  var esc = function (t) {\n    return String(t == null ? '' : t).replace(/[&<>\"']/g, function (c) {\n      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' }[c];\n    });\n  };\n  var p2 = function (n) { return (n < 10 ? '0' : '') + n; };\n  function dur(seg) {\n    seg = Math.max(0, Math.floor(seg));\n    var d = Math.floor(seg / 86400), h = Math.floor(seg % 86400 / 3600), m = Math.floor(seg % 3600 / 60), s = seg % 60;\n    if (d) return d + 'd ' + p2(h) + 'h ' + p2(m) + 'm';\n    if (h) return h + 'h ' + p2(m) + 'm ' + p2(s) + 's';\n    return p2(m) + 'm ' + p2(s) + 's';\n  }\n  function minTxt(m) {\n    if (m == null) return '—';\n    if (m < 60) return Math.round(m) + ' min';\n    return Math.floor(m / 60) + ' h ' + p2(Math.round(m % 60)) + ' min';\n  }\n  function hora(ms, conSegundos) {\n    var o = { hour: '2-digit', minute: '2-digit', hour12: false };\n    if (conSegundos) o.second = '2-digit';\n    try { o.timeZone = (datos && datos.tz) || 'America/New_York'; return new Date(ms).toLocaleTimeString('es', o); }\n    catch (e) { return new Date(ms).toTimeString().slice(0, conSegundos ? 8 : 5); }\n  }\n  function iniciales(n) {\n    return String(n).split(/\\s+/).filter(Boolean).slice(0, 2).map(function (x) { return x[0]; }).join('').toUpperCase();\n  }\n  function tonoEspera(min) {\n    var meta = (datos && datos.metaRespuestaMin) || 60;\n    return min < meta / 2 ? 't-ok' : min < meta ? 't-warn' : 't-late';\n  }\n\n  // ---------- Datos ----------\n  function pedir() {\n    if (enCurso || pausado) return;\n    enCurso = true;\n    if (!datos) pintarConexion('cargando', 'Conectando');\n    var listo = function (texto) { enCurso = false; recibir(texto); programar(); };\n    var falla = function (err) { enCurso = false; recibir(JSON.stringify({ ok: false, error: String(err && err.message || err) })); programar(); };\n    if (demo) { setTimeout(function () { listo(JSON.stringify(datosDemo())); }, 300); return; }\n    google.script.run.withSuccessHandler(listo).withFailureHandler(falla).datosPanelEnVivo();\n  }\n  function intervalo() {\n    if (!datos) return 10;\n    return datos.enHorario ? (datos.segundos || 5) : (datos.segundosFueraDeHorario || 60);\n  }\n  function programar() {\n    clearTimeout(temporizador);\n    if (pausado) return;\n    var s = datos && datos.ok === false ? 15 : intervalo();\n    proxima = Date.now() + s * 1000;\n    temporizador = setTimeout(pedir, s * 1000);\n  }\n  function recibir(texto) {\n    var r;\n    try { r = JSON.parse(texto); } catch (e) { r = { ok: false, error: 'Respuesta no válida del servidor.' }; }\n    if (!r.ok) {\n      $('avisos').innerHTML = '<div class=\"aviso error\" role=\"alert\">No se pudo leer Help Scout: ' + esc(r.error) +\n        (datos ? ' · Se muestran los últimos datos recibidos.' : '') + ' Reintentando…</div>';\n      pintarConexion('error', 'Sin conexión');\n      if (!datos) $('contenido').innerHTML = '<div class=\"esqueleto\">Sin datos todavía.</div>';\n      return;\n    }\n    desfase = Date.parse(r.ahora) - Date.now();\n    datos = r;\n    ultimaOk = Date.now();\n    var avisos = '';\n    if (r.sinVincular && r.sinVincular.length) {\n      avisos += '<div class=\"aviso info\">No encontré en Help Scout a: ' + esc(r.sinVincular.join(', ')) +\n        '. Revisa su email en CONFIG.AGENTES.</div>';\n    }\n    if (demo) avisos += '<div class=\"aviso info\">Vista de demostración con datos de ejemplo (fuera de Apps Script).</div>';\n    $('avisos').innerHTML = avisos;\n    pintar();\n  }\n\n  // ---------- Pintado ----------\n  function pintarConexion(clase, texto) {\n    var el = $('estadoConexion');\n    el.className = 'pill ' + clase;\n    el.lastElementChild.textContent = texto;\n  }\n\n  function pintar() {\n    var p = datos.panel, e = p.equipo;\n    var viejo = null;\n    p.agentes.forEach(function (a) { a.esperando.forEach(function (t) { if (!viejo || t.esperaDesde < viejo) viejo = t.esperaDesde; }); });\n    var html = '';\n    html += '<section class=\"kpis\" aria-label=\"Totales del equipo\">' +\n      kpi('Clientes esperando respuesta', '<span>' + e.esperando + '</span>', 'casos asignados · ' + e.seguimiento + ' en seguimiento', true) +\n      kpi('El que más lleva esperando', viejo ? '<span class=\"reloj\" data-desde=\"' + esc(viejo) + '\" data-color=\"1\">' + dur((ahora() - Date.parse(viejo)) / 1000) + '</span>' : '—', 'corre en vivo, segundo a segundo') +\n      kpi('Respuestas hoy', e.respuestas, e.casosRespondidos + ' casos respondidos') +\n      kpi('Cerrados hoy', e.cerrados, e.asignados + ' asignados · ' + e.reasignados + ' re-asignados') +\n      kpi('Tiempo prom. de respuesta', minTxt(e.promedioRespuestaMin), 'mediana ' + minTxt(e.medianaRespuestaMin) + ' · horario laboral') +\n      kpi('Sin asignar', p.sinAsignar.length, p.sinAsignar.length ? 'esperando que alguien los tome' : 'cola vacía') +\n      '</section>';\n\n    html += '<div class=\"titulo\"><h2>Agentes</h2><span>Toca una tarjeta para ver solo sus tickets</span></div>';\n    html += '<section class=\"agentes\" aria-label=\"Agentes\">' + p.agentes.map(tarjeta).join('') + '</section>';\n\n    html += '<div class=\"doble\">' +\n      '<section class=\"bloque tabla\" aria-label=\"Tickets esperando respuesta\"><div id=\"tabla\"></div></section>' +\n      '<section class=\"bloque feed\" aria-label=\"Actividad\"><div class=\"bloque-cab\"><h3>Lo que va pasando</h3><span class=\"sub\">Hoy · ' + esc(diaBonito(datos.hoy)) + '</span></div>' +\n      feed(p.feed) + '</section></div>';\n\n    html += '<footer><span>Fuente: Help Scout · horario ' + datos.horario.inicio + ':00–' + datos.horario.fin + ':00 · meta de respuesta ' + datos.metaRespuestaMin + ' min</span>' +\n      '<span>Recarga completa a las ' + esc(hora(Date.parse(datos.ultimaRecargaCompleta), false)) + '</span></footer>';\n\n    $('contenido').innerHTML = html;\n    Array.prototype.forEach.call(document.querySelectorAll('.card[data-id]'), function (b) {\n      b.addEventListener('click', function () {\n        var id = b.getAttribute('data-id');\n        filtro = filtro === id ? 'todos' : id;\n        pintarTabla();\n        marcarTarjetas();\n      });\n    });\n    marcarTarjetas();\n    pintarTabla();\n    tic();\n  }\n\n  function kpi(l, v, n, destacado) {\n    return '<div class=\"kpi' + (destacado ? ' destacado' : '') + '\"><span class=\"l\">' + esc(l) + '</span><span class=\"v\">' + v + '</span><span class=\"n\">' + esc(n) + '</span></div>';\n  }\n\n  function tarjeta(a) {\n    if (!a.vinculado || !a.hoy) {\n      return '<div class=\"card sin-vincular\"><div class=\"cab\"><span class=\"avatar\">' + esc(iniciales(a.nombre)) + '</span><span><span class=\"nom\">' + esc(a.nombre) +\n        '</span><span class=\"estado t-neutro\">No vinculada en Help Scout</span></span></div></div>';\n    }\n    var h = a.hoy;\n    var viejo = a.esperando.length ? a.esperando[0].esperaDesde : null;\n    return '<button type=\"button\" class=\"card\" data-id=\"' + a.id + '\" aria-pressed=\"false\">' +\n      '<span class=\"cab\"><span class=\"avatar\">' + esc(iniciales(a.nombre)) + '</span><span><span class=\"nom\">' + esc(a.nombre) + '</span>' +\n      '<span class=\"estado t-neutro\" data-ultima=\"' + esc(h.ultimaRespuesta || '') + '\" data-esperando=\"' + a.esperando.length + '\">—</span></span></span>' +\n      '<span class=\"duo\">' +\n        '<span class=\"caja\"><span class=\"l\">Esperando respuesta</span><span class=\"v\">' + a.esperando.length + '</span></span>' +\n        (viejo\n          ? '<span class=\"caja reloj-caja\" data-desde=\"' + esc(viejo) + '\"><span class=\"l\">El que más espera</span><span class=\"r reloj\" data-desde=\"' + esc(viejo) + '\">' + dur((ahora() - Date.parse(viejo)) / 1000) + '</span></span>'\n          : '<span class=\"caja t-ok\"><span class=\"l\">El que más espera</span><span class=\"r\">Al día</span></span>') +\n      '</span>' +\n      '<span class=\"metricas\">' +\n        m('Asignados hoy', h.asignados) + m('Respuestas', h.respuestas) + m('Cerrados', h.cerrados) +\n        m('En seguimiento', a.seguimiento) + m('Prom. respuesta', minTxt(h.promedioRespuestaMin)) + m('Prom. 1ª resp.', minTxt(h.promedioPrimeraMin)) +\n      '</span>' +\n      '<span class=\"pie\">' + (h.ultimaRespuesta\n        ? 'Última respuesta hace <b class=\"reloj\" data-desde=\"' + esc(h.ultimaRespuesta) + '\">' + dur((ahora() - Date.parse(h.ultimaRespuesta)) / 1000) + '</b> · ' + h.reasignados + ' re-asignados'\n        : 'Todavía no responde hoy · ' + h.reasignados + ' re-asignados') + '</span>' +\n      '</button>';\n  }\n  function m(l, v) { return '<div><span class=\"l\">' + esc(l) + '</span><span class=\"v\">' + esc(v) + '</span></div>'; }\n\n  function marcarTarjetas() {\n    Array.prototype.forEach.call(document.querySelectorAll('.card[data-id]'), function (b) {\n      var activa = b.getAttribute('data-id') === String(filtro);\n      b.classList.toggle('activa', activa);\n      b.setAttribute('aria-pressed', activa ? 'true' : 'false');\n    });\n  }\n\n  function pintarTabla() {\n    var p = datos.panel;\n    var filas = [];\n    p.agentes.forEach(function (a) { a.esperando.forEach(function (t) { filas.push(t); }); });\n    p.sinAsignar.forEach(function (t) { filas.push(t); });\n    var cuenta = function (f) { return filas.filter(f).length; };\n    var chips = [{ id: 'todos', t: 'Todos', n: filas.length }]\n      .concat(p.agentes.filter(function (a) { return a.vinculado; }).map(function (a) {\n        return { id: String(a.id), t: a.nombre.split(' ')[0], n: a.esperando.length };\n      }))\n      .concat([{ id: 'sin', t: 'Sin asignar', n: p.sinAsignar.length }]);\n    var visibles = filas.filter(function (t) {\n      return filtro === 'todos' || (filtro === 'sin' ? !t.agenteId : String(t.agenteId) === String(filtro));\n    }).sort(function (x, y) { return x.esperaDesde < y.esperaDesde ? -1 : 1; });\n    var titulo = filtro === 'todos' ? 'todo el equipo' : filtro === 'sin' ? 'sin asignar'\n      : (p.agentes.filter(function (a) { return String(a.id) === String(filtro); })[0] || {}).nombre;\n\n    var html = '<div class=\"bloque-cab\"><h3>Clientes esperando respuesta · ' + esc(titulo) + '</h3>' +\n      '<span class=\"sub\">Del que más espera al más reciente · meta ' + datos.metaRespuestaMin + ' min</span></div>';\n    html += '<div class=\"chips\" role=\"group\" aria-label=\"Filtrar por agente\">' + chips.map(function (c) {\n      var activa = String(filtro) === c.id;\n      return '<button type=\"button\" class=\"chip' + (activa ? ' activa' : '') + '\" data-f=\"' + c.id + '\" aria-pressed=\"' + activa + '\">' + esc(c.t) + ' · ' + c.n + '</button>';\n    }).join('') + '</div>';\n    if (!visibles.length) {\n      html += '<div class=\"vacio\">Nadie está esperando respuesta aquí.</div>';\n    } else {\n      html += '<div class=\"scroll\"><table><thead><tr><th>Esperando</th><th>Ticket</th><th>Asunto</th><th>Cliente</th><th>Agente</th><th>Estado</th></tr></thead><tbody>' +\n        visibles.map(function (t) {\n          return '<tr><td><span class=\"reloj-t reloj\" data-desde=\"' + esc(t.esperaDesde) + '\" data-color=\"1\">' + dur((ahora() - Date.parse(t.esperaDesde)) / 1000) + '</span></td>' +\n            '<td class=\"num\"><a href=\"' + esc(t.url) + '\" target=\"_blank\" rel=\"noopener\">#' + esc(t.numero) +\n            ' <svg width=\"11\" height=\"11\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M7 17 17 7M8 7h9v9\"/></svg></a></td>' +\n            '<td class=\"asunto\" title=\"' + esc(t.asunto) + '\">' + esc(t.asunto) + '</td>' +\n            '<td class=\"tenue\">' + esc(t.cliente || '—') + '</td>' +\n            '<td>' + (t.agenteId ? esc(t.agente) : '<span class=\"estado t-late\">Sin asignar</span>') + '</td>' +\n            '<td class=\"tenue\">' + (t.estado === 'pending' ? 'Pending · el cliente respondió' : 'Activo') + (t.buzon ? ' · ' + esc(t.buzon) : '') + '</td></tr>';\n        }).join('') + '</tbody></table></div>';\n    }\n    $('tabla').innerHTML = html;\n    Array.prototype.forEach.call(document.querySelectorAll('.chip'), function (b) {\n      b.addEventListener('click', function () { filtro = b.getAttribute('data-f'); pintarTabla(); marcarTarjetas(); });\n    });\n    tic();\n  }\n\n  var ICONOS = {\n    RESPUESTA: ['var(--ok)', 'var(--ok-bg)', '<path d=\"M9 14 4 9l5-5\"/><path d=\"M4 9h10a6 6 0 0 1 6 6v5\"/>'],\n    CLIENTE: ['var(--warn)', 'var(--warn-bg)', '<path d=\"M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z\"/>'],\n    ASIGNADO: ['var(--accent)', 'rgba(124,147,255,.14)', '<circle cx=\"12\" cy=\"8\" r=\"4\"/><path d=\"M4 21a8 8 0 0 1 16 0\"/>'],\n    CERRADO: ['var(--ok)', 'var(--ok-bg)', '<path d=\"M20 6 9 17l-5-5\"/>'],\n    REASIGNADO: ['var(--muted)', 'var(--panel-3)', '<path d=\"M17 1l4 4-4 4\"/><path d=\"M3 11V9a4 4 0 0 1 4-4h14\"/><path d=\"M7 23l-4-4 4-4\"/><path d=\"M21 13v2a4 4 0 0 1-4 4H3\"/>'],\n    NUEVA_CONSULTA: ['var(--warn)', 'var(--warn-bg)', '<path d=\"M12 5v14M5 12h14\"/>'],\n  };\n  function feed(items) {\n    if (!items.length) return '<div class=\"vacio\">Todavía no hay movimientos hoy.</div>';\n    return '<ol>' + items.map(function (f) {\n      var ic = ICONOS[f.tipo] || ICONOS.REASIGNADO;\n      return '<li><span class=\"ic\" style=\"color:' + ic[0] + ';background:' + ic[1] + '\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\">' + ic[2] + '</svg></span>' +\n        '<span><a class=\"tx\" href=\"' + esc(f.url) + '\" target=\"_blank\" rel=\"noopener\">' + esc(f.texto) + '</a><br>' +\n        '<span class=\"hr\">' + esc(hora(Date.parse(f.fecha), false)) + ' · hace <span class=\"reloj\" data-desde=\"' + esc(f.fecha) + '\" data-corto=\"1\">' + corto((ahora() - Date.parse(f.fecha)) / 1000) + '</span></span></span></li>';\n    }).join('') + '</ol>';\n  }\n  function corto(seg) {\n    seg = Math.max(0, Math.floor(seg));\n    if (seg < 60) return seg + ' s';\n    if (seg < 3600) return Math.floor(seg / 60) + ' min';\n    return Math.floor(seg / 3600) + ' h ' + p2(Math.floor(seg % 3600 / 60)) + ' min';\n  }\n  function diaBonito(d) {\n    var f = new Date(d + 'T12:00:00Z');\n    try { return f.toLocaleDateString('es', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' }); } catch (e) { return d; }\n  }\n\n  // ---------- Cada segundo ----------\n  function tic() {\n    var t = ahora();\n    $('reloj').textContent = hora(t, true);\n    if (!datos || !datos.ok) return;\n    var hace = Math.max(0, Math.floor((Date.now() - ultimaOk) / 1000));\n    $('actualizado').textContent = pausado ? 'En pausa · datos de hace ' + corto(hace)\n      : 'Actualizado hace ' + hace + ' s · ' + (datos.enHorario ? 'cada ' + datos.segundos + ' s' : 'fuera de horario, cada ' + datos.segundosFueraDeHorario + ' s');\n    if (!pausado && !enCurso) pintarConexion(datos.enHorario ? 'vivo' : 'fuera', datos.enHorario ? 'En vivo' : 'Fuera de horario');\n    if (pausado) pintarConexion('pausa', 'En pausa');\n    var total = intervalo() * 1000;\n    $('barra').style.width = pausado ? '0' : Math.min(100, Math.max(0, 100 - (proxima - Date.now()) / total * 100)) + '%';\n\n    Array.prototype.forEach.call(document.querySelectorAll('.reloj[data-desde]'), function (el) {\n      var seg = (t - Date.parse(el.getAttribute('data-desde'))) / 1000;\n      el.textContent = el.getAttribute('data-corto') ? corto(seg) : dur(seg);\n      if (el.getAttribute('data-color')) {\n        el.classList.remove('t-ok', 't-warn', 't-late');\n        el.classList.add(tonoEspera(seg / 60));\n        if (!el.classList.contains('reloj-t')) el.style.background = 'none';\n      }\n    });\n    Array.prototype.forEach.call(document.querySelectorAll('.reloj-caja'), function (el) {\n      var min = (t - Date.parse(el.getAttribute('data-desde'))) / 60000;\n      el.classList.remove('t-ok', 't-warn', 't-late');\n      el.classList.add(tonoEspera(min));\n      var r = el.querySelector('.r');\n      r.style.color = min < datos.metaRespuestaMin / 2 ? 'var(--ok)' : min < datos.metaRespuestaMin ? 'var(--warn)' : 'var(--late)';\n    });\n    var alerta = datos.alertaSinResponderMin || [10, 30];\n    Array.prototype.forEach.call(document.querySelectorAll('.estado[data-esperando]'), function (el) {\n      var esperando = Number(el.getAttribute('data-esperando'));\n      var ultima = el.getAttribute('data-ultima');\n      var min = ultima ? (t - Date.parse(ultima)) / 60000 : Infinity;\n      var clase, texto;\n      if (!esperando) { clase = 't-ok'; texto = 'Al día'; }\n      else if (!datos.enHorario) { clase = 't-neutro'; texto = 'Fuera de horario'; }\n      else if (min < alerta[0]) { clase = 't-ok'; texto = 'Respondiendo'; }\n      else if (min < alerta[1]) { clase = 't-warn'; texto = 'Sin responder hace ' + Math.floor(min) + ' min'; }\n      else { clase = 't-late'; texto = ultima ? 'Sin responder hace ' + corto(min * 60) : 'Sin responder hoy'; }\n      el.className = 'estado ' + clase;\n      el.textContent = texto;\n    });\n  }\n\n  // ---------- Controles ----------\n  $('btnPausa').addEventListener('click', function () {\n    pausado = !pausado;\n    this.setAttribute('aria-pressed', pausado ? 'true' : 'false');\n    this.lastElementChild.textContent = pausado ? 'Reanudar' : 'Pausar';\n    if (pausado) clearTimeout(temporizador); else pedir();\n    tic();\n  });\n  if (document.fullscreenEnabled) {\n    $('btnPantalla').hidden = false;\n    $('btnPantalla').addEventListener('click', function () {\n      if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen();\n    });\n  }\n  document.addEventListener('visibilitychange', function () {\n    if (!document.hidden && !pausado && Date.now() - ultimaOk > intervalo() * 1000) pedir();\n  });\n\n  // ---------- Demo (solo al abrir el archivo fuera de Apps Script) ----------\n  function datosDemo() {\n    var n = Date.now();\n    var hace = function (min) { return new Date(n - min * 60000).toISOString(); };\n    var t = function (num, min, asunto, cliente, agenteId, agente, estado) {\n      return { id: num, numero: num, asunto: asunto, cliente: cliente, estado: estado || 'active', esperaDesde: hace(min), agenteId: agenteId, agente: agente, buzon: 'Soporte', url: '#' };\n    };\n    var ag = function (id, nombre, esp, seg, hoy) { return { id: id, nombre: nombre, vinculado: true, esperando: esp, seguimiento: seg, abiertos: esp.length + seg, hoy: hoy }; };\n    var hoy = function (r, c, a, re, pr, p1, ult) { return { respuestas: r, casosRespondidos: Math.round(r * .7), asignados: a, cerrados: c, reasignados: re, nuevasConsultas: 2, promedioRespuestaMin: pr, medianaRespuestaMin: pr - 2, promedioPrimeraMin: p1, ultimaRespuesta: ult }; };\n    return {\n      ok: true, ahora: new Date(n).toISOString(), hoy: new Date(n).toISOString().slice(0, 10), tz: 'America/New_York', enHorario: true,\n      horario: { inicio: 9, fin: 17 }, segundos: 5, segundosFueraDeHorario: 60, metaRespuestaMin: 60, alertaSinResponderMin: [10, 30],\n      ultimaRecargaCompleta: hace(4), sinVincular: [],\n      panel: {\n        agentes: [\n          ag(1, 'Jaideth Andocilla', [t(4518, 41, 'Quiero cambiar la fecha de mi entrada', 'Carlos Pérez', 1, 'Jaideth Andocilla'), t(4512, 12, 'No me llegó el acceso al evento', 'Laura Gómez', 1, 'Jaideth Andocilla')], 2, hoy(38, 17, 21, 2, 12, 9, hace(2))),\n          ag(2, 'Maryelin Rios', [t(4498, 96, 'Cobro duplicado en mi tarjeta', 'José Martínez', 2, 'Maryelin Rios'), t(4509, 67, 'Solicitud de reembolso', 'Ana Lucía Torres', 2, 'Maryelin Rios', 'pending'), t(4520, 38, 'No puedo iniciar sesión', 'Diego Herrera', 2, 'Maryelin Rios')], 1, hoy(19, 8, 18, 1, 43, 31, hace(34))),\n          ag(3, 'Edna Escudero', [t(4532, 18, 'El código QR no funciona', 'Valentina Castro', 3, 'Edna Escudero')], 3, hoy(44, 22, 23, 3, 8, 6, hace(1))),\n          ag(4, 'Andrés Rodríguez', [t(4503, 54, 'Necesito la factura de mi compra', 'Luis Ramírez', 4, 'Andrés Rodríguez'), t(4524, 27, '¿Puedo transferir mi entrada?', 'Camila Ortiz', 4, 'Andrés Rodríguez')], 1, hoy(27, 11, 16, 4, 22, 15, hace(13))),\n        ],\n        sinAsignar: [t(4540, 7, 'Ubicación del evento', 'Andrea Molina', null, ''), t(4542, 1, 'Error al pagar con PayPal', 'Felipe Rojas', null, '')],\n        equipo: { esperando: 8, seguimiento: 7, respuestas: 128, casosRespondidos: 90, asignados: 78, cerrados: 58, reasignados: 10, nuevasConsultas: 8, promedioRespuestaMin: 18.4, medianaRespuestaMin: 12, promedioPrimeraMin: 14 },\n        feed: [\n          { fecha: hace(0.3), tipo: 'RESPUESTA', texto: 'Edna Escudero respondió el #4521', url: '#' },\n          { fecha: hace(1), tipo: 'CLIENTE', texto: 'El cliente escribió en el #4542 · sin asignar', url: '#' },\n          { fecha: hace(2), tipo: 'RESPUESTA', texto: 'Jaideth Andocilla respondió el #4531', url: '#' },\n          { fecha: hace(5), tipo: 'CERRADO', texto: 'Edna Escudero cerró el #4517', url: '#' },\n          { fecha: hace(9), tipo: 'ASIGNADO', texto: 'Andrés Rodríguez tomó el #4530', url: '#' },\n          { fecha: hace(13), tipo: 'REASIGNADO', texto: 'Andrés Rodríguez re-asignó el #4511', url: '#' },\n          { fecha: hace(20), tipo: 'NUEVA_CONSULTA', texto: 'Nueva consulta en el #4470 (Maryelin Rios)', url: '#' },\n        ],\n      },\n    };\n  }\n\n  setInterval(tic, 1000);\n  tic();\n  pedir();\n})();\n</script>\n</body>\n</html>\n";

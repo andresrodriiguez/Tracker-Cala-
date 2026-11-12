@@ -81,6 +81,35 @@ Recarga la hoja. Aparece el menú **Help Scout**:
 
 Google pedirá autorizar el script la primera vez. Es normal: se conecta a Help Scout y edita esta hoja.
 
+## 📡 Panel en vivo (página aparte)
+
+Una página web, aparte de la hoja, que muestra **en tiempo real** cómo va el equipo en Help Scout:
+
+- **Totales del equipo**: clientes esperando respuesta, el cliente que **más lleva esperando** (reloj que corre segundo a segundo), respuestas y cerrados de hoy, tiempo promedio de respuesta y cola **sin asignar**.
+- **Una tarjeta por agente**: cuántos clientes la esperan y con cuántos está en seguimiento, el reloj de su cliente más antiguo, asignados, respuestas, cerrados y re-asignados de hoy, tiempo promedio de respuesta y de 1ª respuesta, y **hace cuánto respondió por última vez**. El estado se pinta solo: *Respondiendo* / *Sin responder hace X min* (amarillo a los 10 min, rojo a los 30, si tiene clientes esperando) / *Al día*.
+- **Tabla de clientes esperando**, del que más espera al más reciente, con su reloj en verde, amarillo o rojo según la meta (60 min) y enlace directo al caso. Se filtra por agente.
+- **Lo que va pasando**: cada respuesta, mensaje del cliente, asignación, cierre y re-asignación del día.
+
+Usa las mismas credenciales, agentes, horario y reglas del tracker. Los conteos del día siguen las mismas reglas que la hoja
+(día de jornada, cierres automáticos no cuentan, etc.). Los tiempos de respuesta se miden desde el **primer** mensaje del cliente
+sin contestar hasta la respuesta de la agente, en horario laboral. Los relojes de espera corren en tiempo real.
+
+**Cómo se actualiza**: la página consulta Help Scout **cada 5 segundos** en horario laboral (cada 60 s fuera de él). Cada consulta pide
+solo lo que cambió desde la anterior (normalmente 1 llamada a la API), y cada 10 minutos se vuelve a leer todo desde cero.
+Se ajusta en `CONFIG.PANEL`.
+
+### Publicarlo (una vez, ~3 min)
+1. Pega el `dist/Codigo.gs` nuevo y el `appsscript.json` nuevo (pasos 3.2 y 3.3 de la instalación) y guarda.
+2. En el editor de Apps Script: **Implementar → Nueva implementación** → ⚙️ **Aplicación web**.
+3. *Ejecutar como*: **Yo** · *Quién tiene acceso*: **Solo yo** → **Implementar**. Autoriza si lo pide.
+4. Copia la **URL de la aplicación web** y guárdala en favoritos. También aparece en la hoja: **Help Scout → 📡 Panel en vivo**.
+
+> Cuando actualices el código, el panel no cambia hasta que hagas **Implementar → Gestionar implementaciones → ✏️ → Versión: Nueva versión → Implementar** (la URL se mantiene).
+
+**Límites**: con la página abierta en horario laboral son ~720 consultas por hora a Help Scout (muy por debajo de su límite) y a
+Google (UrlFetch: 20.000 al día en cuentas gratuitas, 100.000 en Google Workspace). Si la dejas abierta las 24 h en una cuenta
+gratuita, sube `SEGUNDOS_ACTUALIZACION` a 10. Si `MAILBOXES_EQUIPO` está vacío, la cola "sin asignar" incluye todos los buzones que ve la app.
+
 ## ¿Cómo pasan los casos a CCH / COACH?
 
 Según cómo lo hagan en Help Scout, ajusta `Config.gs`:
@@ -103,7 +132,8 @@ Según cómo lo hagan en Help Scout, ajusta `Config.gs`:
 
 El código fuente está separado por archivos en [`apps-script/`](apps-script). `dist/Codigo.gs` se genera a partir de ellos,
 así que después de cualquier cambio hay que regenerarlo. La lógica que interpreta el historial de Help Scout
-(`Eventos.gs`, `Metricas.gs`, `Util.gs`) es JavaScript puro y tiene pruebas:
+(`Eventos.gs`, `Metricas.gs`, `Util.gs`, `EnVivo.gs`) es JavaScript puro y tiene pruebas. La página del panel es `Panel.html`
+(ábrela directo en el navegador para verla con datos de ejemplo); el build la incluye dentro de `dist/Codigo.gs`:
 
 ```bash
 npm test        # pruebas

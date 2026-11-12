@@ -76,6 +76,23 @@ const CONFIG = {
     ESCRIBIR_CEROS: false,
   },
 
+  // --- Panel en vivo (página web aparte: ver README, "Panel en vivo") ---
+  PANEL: {
+    // Cada cuántos segundos la página consulta Help Scout (en horario laboral y fuera de él).
+    SEGUNDOS_ACTUALIZACION: 5,
+    SEGUNDOS_FUERA_DE_HORARIO: 60,
+    // Cada cuántos minutos se vuelve a leer todo desde cero (por si algo se escapó).
+    MINUTOS_RECARGA_COMPLETA: 10,
+    // Meta para responder al cliente: el reloj de cada ticket pasa a amarillo a la mitad y a rojo al llegar.
+    META_RESPUESTA_MIN: 60,
+    // Estado de cada agente: amarillo / rojo si tiene clientes esperando y no responde hace estos minutos.
+    ALERTA_SIN_RESPONDER_MIN: [10, 30],
+    // Mostrar la cola de casos activos sin asignar (de los buzones de MAILBOXES_EQUIPO, o de todos si está vacío).
+    MOSTRAR_SIN_ASIGNAR: true,
+    MAX_PAGINAS_SIN_ASIGNAR: 4, // 25 casos por página
+    MAX_PAGINAS_DIA: 30,
+  },
+
   // Hojas que crea el script.
   HOJAS: {
     eventos: 'HS_Eventos',

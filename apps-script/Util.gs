@@ -103,3 +103,15 @@ function mesDesdeNombreHoja(nombre) {
   const mes = MESES.findIndex(n => normalizarTexto(n) === m[1]);
   return mes < 0 ? null : { anio: Number(m[2]), mes: mes + 1 };
 }
+
+/**
+ * Momento (hora local 'yyyy-MM-dd HH:mm:ss') desde el que los movimientos cuentan para el día de
+ * jornada `dia`: el cierre de la jornada laboral anterior.
+ * Ej. (9–17, lun–sáb): miércoles → martes 17:00:00; lunes → sábado 17:00:00.
+ */
+function inicioVentanaJornada(dia, horario) {
+  const DIA = 86400000;
+  let d = new Date(dia + 'T00:00:00Z').getTime() - DIA;
+  for (let i = 0; i < 7 && horario.dias.indexOf(new Date(d).getUTCDay()) < 0; i++) d -= DIA;
+  return new Date(d).toISOString().slice(0, 10) + ' ' + String(horario.fin).padStart(2, '0') + ':00:00';
+}

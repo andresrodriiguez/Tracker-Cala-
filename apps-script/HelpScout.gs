@@ -63,15 +63,18 @@ function hsGet_(ruta, params) {
   throw new Error('Help Scout no respondió después de varios intentos: ' + ruta);
 }
 
-/** Recorre todas las páginas de un listado y devuelve los elementos de _embedded[clave]. */
-function hsListarTodo_(ruta, params, clave) {
+/**
+ * Recorre todas las páginas de un listado y devuelve los elementos de _embedded[clave].
+ * maxPaginas (opcional) corta la lectura después de esa cantidad de páginas.
+ */
+function hsListarTodo_(ruta, params, clave, maxPaginas) {
   const todos = [];
   for (let pagina = 1; ; pagina++) {
     const data = hsGet_(ruta, Object.assign({}, params, { page: pagina }));
     const items = (data._embedded && data._embedded[clave]) || [];
     Array.prototype.push.apply(todos, items);
     const totalPaginas = data.page ? data.page.totalPages : 1;
-    if (!items.length || pagina >= totalPaginas) return todos;
+    if (!items.length || pagina >= totalPaginas || (maxPaginas && pagina >= maxPaginas)) return todos;
   }
 }
 
