@@ -1,14 +1,15 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-<base target="_top">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<base target="_top">
 <title>Soporte · Control en vivo</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
+
 :root {
   --bg: #0B0B0C;
   --surface: #111113;
@@ -157,9 +158,18 @@ dialog::backdrop { background: rgba(0, 0, 0, .66); }
   .hora { text-align: left; }
   .registro li { grid-template-columns: 44px 92px minmax(0, 1fr); padding: 9px 12px; }
 }
+
+/* Encabezado agrupado de la tabla de agentes */
+.t-agentes thead tr.grupos th { font-size: 10px; color: var(--text-3); padding-top: 9px; padding-bottom: 0; border-bottom: 0; }
+.t-agentes thead tr.grupos + tr th { padding-top: 5px; }
+.fuente { font-size: 11.5px; color: var(--text-2); }
+[hidden] { display: none !important; }
+.linea-check { display: flex; align-items: center; gap: 9px; min-height: 28px; font-size: 13px; cursor: pointer; }
+.linea-check input { width: 15px; height: 15px; accent-color: #F2F2F3; }
 </style>
 </head>
 <body>
+<div id="app">
 <header class="cab">
   <div class="cab-in">
     <div class="marca"><b>Soporte</b><span>Control en vivo · Help Scout</span></div>
@@ -173,12 +183,13 @@ dialog::backdrop { background: rgba(0, 0, 0, .66); }
 
 <main class="pagina">
   <div id="avisos"></div>
-  <div id="contenido"><div class="cargando">Leyendo Help Scout. La primera carga puede tardar hasta un minuto.</div></div>
+  <div id="contenido"><div class="cargando" id="progreso">Leyendo Help Scout.</div></div>
 </main>
+</div>
 
 <dialog id="dlgExportar" aria-labelledby="tituloExportar">
   <div class="dlg-cab">
-    <div><h3 id="tituloExportar">Exportar métricas</h3><p id="subExportar">Datos del historial del tracker (hoja HS_Eventos).</p></div>
+    <div><h3 id="tituloExportar">Exportar métricas</h3><p>Cifras de los reportes oficiales de Help Scout (las mismas de su sección Reports).</p></div>
     <button type="button" class="btn chico" data-cerrar>Cerrar</button>
   </div>
   <div class="dlg-cuerpo">
@@ -192,7 +203,7 @@ dialog::backdrop { background: rgba(0, 0, 0, .66); }
           <option value="semanaPasada">Semana pasada</option>
           <option value="mes">Este mes</option>
           <option value="mesPasado">Mes pasado</option>
-          <option value="todo">Todo el historial</option>
+          <option value="90">Últimos 90 días</option>
           <option value="personal">Personalizado</option>
         </select>
         <div class="fechas">
@@ -205,14 +216,12 @@ dialog::backdrop { background: rgba(0, 0, 0, .66); }
         <div class="checks" id="expAgentes"></div>
       </div>
       <div class="campo">
-        <span class="rot">Movimientos en la hoja de detalle</span>
-        <div class="checks" id="expTipos">
-          <label><input type="checkbox" value="ASIGNADO" checked> Asignados</label>
-          <label><input type="checkbox" value="RESPUESTA" checked> Respuestas</label>
-          <label><input type="checkbox" value="PRIMERA_RESPUESTA" checked> Primeras respuestas</label>
-          <label><input type="checkbox" value="NUEVA_CONSULTA" checked> Nuevas consultas</label>
-          <label><input type="checkbox" value="REASIGNADO" checked> Re-asignados</label>
-          <label><input type="checkbox" value="CERRADO" checked> Cerrados</label>
+        <span class="rot">Contenido del archivo</span>
+        <div class="checks">
+          <label><input type="checkbox" checked disabled> Resumen por agente</label>
+          <label><input type="checkbox" id="expSeries" checked> Evolución por día, semana o mes</label>
+          <label><input type="checkbox" id="expCasos"> Lista de conversaciones con sus tiempos (más lento)</label>
+          <label><input type="checkbox" id="expOficina"> Tiempos solo en horario de oficina de Help Scout</label>
         </div>
       </div>
     </div>
@@ -220,9 +229,9 @@ dialog::backdrop { background: rgba(0, 0, 0, .66); }
       <button type="button" class="btn" id="expVer">Ver vista previa</button>
       <button type="button" class="btn principal" id="expExcel">Descargar Excel</button>
       <select id="expCsvHoja" aria-label="Hoja para CSV" style="height:36px;padding:0 10px;border-radius:6px;border:1px solid var(--line-2);background:var(--bg);color-scheme:dark">
-        <option value="agentes">CSV · Resumen por agente</option>
-        <option value="dias">CSV · Por día</option>
-        <option value="detalle">CSV · Detalle de movimientos</option>
+        <option value="resumen">CSV · Resumen por agente</option>
+        <option value="series">CSV · Evolución</option>
+        <option value="casos">CSV · Conversaciones</option>
       </select>
       <button type="button" class="btn" id="expCsv">Descargar CSV</button>
       <span class="nota" id="expEstado" role="status"></span>
@@ -240,11 +249,184 @@ dialog::backdrop { background: rgba(0, 0, 0, .66); }
 </dialog>
 
 <script>
+/**
+ * Lógica pura del panel (la usan el servidor, el navegador y las pruebas).
+ *
+ * Todo sale del historial de mensajes ("threads") de cada conversación de Help Scout:
+ *  - Cliente esperando: el caso está Active o Pending y el último mensaje es del cliente.
+ *  - Reloj de espera: desde el PRIMER mensaje del cliente que sigue sin contestar.
+ * Las notas internas, las asignaciones y los cambios de estado no cuentan como respuesta.
+ * Las cifras del día (respuestas, resueltos, tiempos...) NO se calculan aquí: vienen de los
+ * reportes oficiales de Help Scout.
+ */
+(function (raiz, fabrica) {
+  if (typeof module === 'object' && module.exports) module.exports = fabrica();
+  else raiz.Logica = fabrica();
+})(typeof self !== 'undefined' ? self : this, function () {
+  'use strict';
+  var TIPOS_MENSAJE = ['message', 'chat', 'phone'];
+
+  function hilosPublicados(conv) {
+    return ((conv._embedded && conv._embedded.threads) || [])
+      .filter(function (h) { return !h.state || h.state === 'published'; })
+      .slice()
+      .sort(function (a, b) { return (new Date(a.createdAt) - new Date(b.createdAt)) || (a.id - b.id); });
+  }
+  function idUsuario(p) { return p && Number(p.id) > 0 ? Number(p.id) : null; }
+  function esDelCliente(h) { return h.type === 'customer' || (h.createdBy || {}).type === 'customer'; }
+  function esRespuesta(h) { return !esDelCliente(h) && (h.createdBy || {}).type === 'user' && TIPOS_MENSAJE.indexOf(h.type) >= 0; }
+
+  /**
+   * Conversación de Help Scout (con _embedded.threads) → resumen compacto.
+   * @param {Object} conv
+   * @param {Date|string} desdeHoy  inicio del día local: los movimientos desde ahí van en `mv`
+   * @return {{id, n, s, c, st, a, mb, w, mv}}
+   *   w  = fecha ISO desde la que espera el cliente (null si nadie espera)
+   *   mv = movimientos de hoy: [tipo, usuarioId, fechaIso]
+   *        'C' mensaje del cliente · 'R' respuesta de un usuario · 'X' cierre · 'A' asignación (usuarioId = a quién)
+   */
+  function resumirConversacion(conv, desdeHoy) {
+    var corte = new Date(desdeHoy).getTime();
+    var publicada = !conv.state || conv.state === 'published';
+    var abierta = publicada && (conv.status === 'active' || conv.status === 'pending');
+    var cliente = conv.primaryCustomer || {};
+    var nombre = [cliente.first, cliente.last].filter(Boolean).join(' ') || cliente.email || '';
+    var mv = [];
+    var desde = null, estado = null, asignado;
+
+    hilosPublicados(conv).forEach(function (h) {
+      var fecha = new Date(h.createdAt);
+      var hoy = fecha.getTime() >= corte;
+      var autor = h.createdBy || {};
+      var previo = estado;
+      if (h.status && h.status !== 'nochange') estado = h.status;
+
+      if ('assignedTo' in h) {
+        var nuevo = idUsuario(h.assignedTo);
+        if (nuevo !== null && nuevo !== asignado && hoy) mv.push(['A', nuevo, fecha.toISOString()]); // cambió de manos
+        asignado = nuevo;
+      }
+      if (esDelCliente(h)) {
+        if (!desde) desde = fecha;
+        if (hoy) mv.push(['C', 0, fecha.toISOString()]);
+        return;
+      }
+      if (esRespuesta(h)) {
+        desde = null; // le respondieron
+        if (hoy) mv.push(['R', Number(autor.id), fecha.toISOString()]);
+      }
+      if (estado === 'closed' && previo !== 'closed') {
+        desde = null; // se cerró el caso
+        if (hoy && autor.type === 'user') mv.push(['X', Number(autor.id), fecha.toISOString()]);
+      }
+    });
+
+    return {
+      id: conv.id,
+      n: conv.number,
+      s: String(conv.subject || '(sin asunto)').slice(0, 140),
+      c: String(nombre).slice(0, 60),
+      st: publicada ? conv.status : 'deleted',
+      a: idUsuario(conv.assignee),
+      mb: conv.mailboxId || null,
+      w: abierta && desde ? desde.toISOString() : null,
+      mv: mv,
+    };
+  }
+
+  /** ¿Hay que conservar esta conversación en el panel? */
+  function esRelevante(c, equipo, mostrarSinAsignar) {
+    var abierta = c.st === 'active' || c.st === 'pending';
+    if (abierta && c.a && equipo[c.a]) return true;
+    if (abierta && !c.a && mostrarSinAsignar) return true;
+    return c.mv.some(function (m) { return m[0] !== 'C' && !!equipo[m[1]]; });
+  }
+
+  var URL_CASO = 'https://secure.helpscout.net/conversation/';
+
+  /**
+   * @param {Object[]} compactos
+   * @param {{id: number, nombre: string}[]} agentes  (id null si no está vinculada en Help Scout)
+   * @param {{buzones?: Object, mostrarSinAsignar?: boolean, maxFeed?: number}} op
+   */
+  function armarPanel(compactos, agentes, op) {
+    op = op || {};
+    var equipo = {};
+    agentes.forEach(function (a) { if (a.id) equipo[a.id] = a; });
+    var nombre = function (id) { return equipo[id] ? equipo[id].nombre : ''; };
+    var ticket = function (c) {
+      return {
+        id: c.id, numero: c.n, asunto: c.s, cliente: c.c, estado: c.st, esperaDesde: c.w,
+        agenteId: c.a && equipo[c.a] ? c.a : null, agente: nombre(c.a),
+        buzon: (op.buzones && op.buzones[c.mb]) || '', url: URL_CASO + c.id + '/' + c.n,
+      };
+    };
+    var porEspera = function (x, y) { return String(x.esperaDesde || '9').localeCompare(String(y.esperaDesde || '9')); };
+
+    var abiertos = [], sinAsignar = [], feed = [], ultima = {}, respuestas = {};
+    compactos.forEach(function (c) {
+      var abierta = c.st === 'active' || c.st === 'pending';
+      var delEquipo = !!(c.a && equipo[c.a]);
+      if (abierta && delEquipo) abiertos.push(ticket(c));
+      if (abierta && !c.a && op.mostrarSinAsignar !== false && c.w) sinAsignar.push(ticket(c));
+      c.mv.forEach(function (m) {
+        var tipo = m[0], quien = m[1], fecha = m[2];
+        if (tipo === 'C') {
+          if (delEquipo || !c.a) feed.push({ fecha: fecha, tipo: 'CLIENTE', agente: delEquipo ? nombre(c.a) : '', numero: c.n, asunto: c.s, url: URL_CASO + c.id + '/' + c.n });
+          return;
+        }
+        if (!equipo[quien]) return;
+        if (tipo === 'R') {
+          respuestas[quien] = (respuestas[quien] || 0) + 1;
+          if (!ultima[quien] || fecha > ultima[quien]) ultima[quien] = fecha;
+        }
+        feed.push({ fecha: fecha, tipo: { R: 'RESPUESTA', X: 'CERRADO', A: 'ASIGNADO' }[tipo], agente: nombre(quien), numero: c.n, asunto: c.s, url: URL_CASO + c.id + '/' + c.n });
+      });
+    });
+
+    var filas = agentes.map(function (a) {
+      var suyos = abiertos.filter(function (t) { return t.agenteId === a.id; });
+      var esperando = suyos.filter(function (t) { return t.esperaDesde; }).sort(porEspera);
+      return {
+        id: a.id, nombre: a.nombre, vinculado: !!a.id,
+        esperando: esperando,
+        enSeguimiento: suyos.filter(function (t) { return !t.esperaDesde; }).sort(function (x, y) { return x.numero - y.numero; }),
+        seguimiento: suyos.length - esperando.length,
+        abiertos: suyos.length,
+        activos: suyos.filter(function (t) { return t.estado === 'active'; }).length,
+        pendientes: suyos.filter(function (t) { return t.estado === 'pending'; }).length,
+        ultimaRespuesta: ultima[a.id] || null,
+        respuestasVistas: respuestas[a.id] || 0, // conteo directo de hoy, solo para contrastar con el reporte
+      };
+    });
+    var suma = function (k) { return filas.reduce(function (s, f) { return s + (k === 'esperando' ? f.esperando.length : f[k]); }, 0); };
+    feed.sort(function (x, y) { return x.fecha < y.fecha ? 1 : x.fecha > y.fecha ? -1 : 0; });
+    return {
+      agentes: filas,
+      sinAsignar: sinAsignar.sort(porEspera),
+      equipo: { esperando: suma('esperando'), seguimiento: suma('seguimiento'), abiertos: suma('abiertos'), activos: suma('activos'), pendientes: suma('pendientes') },
+      feed: feed.slice(0, op.maxFeed || 60),
+      movimientos: feed.length,
+    };
+  }
+
+  return { resumirConversacion: resumirConversacion, esRelevante: esRelevante, armarPanel: armarPanel };
+});
+</script>
+<script>
+/* Panel en vivo: pide los datos al servidor (apiPanel), guarda el estado en el navegador y pinta la página. */
 (function () {
   'use strict';
-  var datos = null, desfase = 0, filtro = 'todos', pausado = false, enCurso = false, ultimaOk = 0, proxima = 0, temporizador = null;
-  var demo = typeof google === 'undefined' || !google.script || !google.script.run;
-  var reporte = null;
+  // Dentro de Apps Script existe google.script.run; fuera (al abrir el archivo suelto) se usan datos de ejemplo.
+  var GAS = typeof google !== 'undefined' && google.script && google.script.run;
+  var DEMO = !GAS;
+  var E = {
+    cfg: null, agentes: [], buzones: {}, sinVincular: [], hoy: null, inicioHoy: null, enHorario: true,
+    convs: {}, cursor: null, baseEn: 0, cargandoBase: false, verificacion: null,
+    reporte: null, reporteEn: 0, panel: null,
+  };
+  var desfase = 0, filtro = 'todos', pausado = false, enCurso = false, ultimaOk = 0, proxima = 0, temporizador = null, errorActual = '';
+  var exportacion = null;
 
   var $ = function (id) { return document.getElementById(id); };
   var todos = function (sel, raiz) { return Array.prototype.slice.call((raiz || document).querySelectorAll(sel)); };
@@ -258,124 +440,234 @@ dialog::backdrop { background: rgba(0, 0, 0, .66); }
   function dur(seg) {
     seg = Math.max(0, Math.floor(seg));
     var d = Math.floor(seg / 86400), h = Math.floor(seg % 86400 / 3600), m = Math.floor(seg % 3600 / 60), s = seg % 60;
-    if (d) return d + ' d ' + p2(h) + ':' + p2(m) + ':' + p2(s);
-    return p2(h) + ':' + p2(m) + ':' + p2(s);
+    return (d ? d + ' d ' : '') + p2(h) + ':' + p2(m) + ':' + p2(s);
   }
   function corto(seg) {
-    seg = Math.max(0, Math.floor(seg));
+    if (seg == null) return '—';
+    seg = Math.max(0, Math.round(seg));
     if (seg < 60) return seg + ' s';
     if (seg < 3600) return Math.floor(seg / 60) + ' min';
     if (seg < 86400) return Math.floor(seg / 3600) + ' h ' + p2(Math.floor(seg % 3600 / 60)) + ' min';
     return Math.floor(seg / 86400) + ' d ' + Math.floor(seg % 86400 / 3600) + ' h';
   }
-  function minTxt(m) {
-    if (m == null) return '—';
-    if (m < 60) return (Math.round(m * 10) / 10).toLocaleString('es') + ' min';
-    return Math.floor(m / 60) + ' h ' + p2(Math.round(m % 60)) + ' min';
-  }
-  function tz() { return (datos && datos.tz) || 'America/New_York'; }
+  var num = function (v) { return v == null ? '—' : Number(v).toLocaleString('es', { maximumFractionDigits: 1 }); };
+  var tz = function () { return (E.cfg && E.cfg.tz) || 'America/New_York'; };
   function hora(ms, seg) {
     var o = { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: tz() };
     if (seg) o.second = '2-digit';
     try { return new Date(ms).toLocaleTimeString('es', o); } catch (e) { return new Date(ms).toTimeString().slice(0, seg ? 8 : 5); }
   }
+  function diaLocal(ms) {
+    try { return new Intl.DateTimeFormat('en-CA', { timeZone: tz(), year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ms)); }
+    catch (e) { return new Date(ms).toISOString().slice(0, 10); }
+  }
+  function diaLargo(d) {
+    try { return new Date(d + 'T12:00:00Z').toLocaleDateString('es', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' }); } catch (e) { return d; }
+  }
   function tono(min) {
-    var meta = (datos && datos.metaRespuestaMin) || 60;
+    var meta = (E.cfg && E.cfg.metaRespuestaMin) || 60;
     return min < meta / 2 ? 'ok' : min < meta ? 'warn' : 'bad';
   }
-  function servidor(fn, arg, listo) {
-    if (demo) { setTimeout(function () { listo(JSON.stringify(DEMO[fn](arg))); }, 250); return; }
-    var corre = google.script.run
-      .withSuccessHandler(listo)
-      .withFailureHandler(function (err) { listo(JSON.stringify({ ok: false, error: String(err && err.message || err) })); });
-    if (arg === undefined) corre[fn](); else corre[fn](arg);
-  }
-  function leer(texto) { try { return JSON.parse(texto); } catch (e) { return { ok: false, error: 'Respuesta no válida del servidor.' }; } }
 
-  // ---------- Datos en vivo ----------
-  function pedir() {
+  // ---------- Servidor ----------
+  function api(ruta) {
+    var llamada = DEMO ? window.DemoApi(ruta) : new Promise(function (listo) {
+      google.script.run
+        .withSuccessHandler(listo)
+        .withFailureHandler(function (err) { listo(JSON.stringify({ ok: false, error: String((err && err.message) || err) })); })
+        .apiPanel(ruta);
+    });
+    return llamada.then(function (texto) {
+      var d;
+      try { d = typeof texto === 'string' ? JSON.parse(texto) : texto; } catch (e) { d = { ok: false, error: 'Respuesta no válida del servidor.' }; }
+      if (!d.ok) throw new Error(d.error || 'Error desconocido.');
+      if (d.ahora) desfase = Date.parse(d.ahora) - Date.now();
+      return d;
+    });
+  }
+
+  // ---------- Carga completa (y verificación contra Help Scout) ----------
+  function relevante(c) {
+    var equipo = {};
+    E.agentes.forEach(function (a) { if (a.id) equipo[a.id] = a; });
+    return Logica.esRelevante(c, equipo, E.cfg.mostrarSinAsignar);
+  }
+  function progreso(texto) { var el = $('progreso'); if (el) el.textContent = texto; }
+
+  function cargarBase() {
+    E.cargandoBase = true;
+    var nuevas = {}, control = [], colaCompleta = true, inicio;
+    var guardar = function (lista) { lista.forEach(function (c) { if (relevante(c)) nuevas[c.id] = c; else delete nuevas[c.id]; }); };
+    return api('/api/equipo').then(function (eq) {
+      E.cfg = eq.config; E.agentes = eq.agentes; E.buzones = eq.buzones; E.sinVincular = eq.sinVincular;
+      E.hoy = eq.hoy; E.inicioHoy = eq.inicioHoy; E.enHorario = eq.enHorario;
+      inicio = eq.ahora;
+      var vinculadas = E.agentes.filter(function (a) { return a.id; });
+      // 1) Casos abiertos de cada agente, una por una.
+      return vinculadas.reduce(function (cadena, a) {
+        return cadena.then(function () {
+          progreso('Leyendo los casos abiertos de ' + a.nombre + '.');
+          return api('/api/abiertos?agente=' + a.id).then(function (r) {
+            guardar(r.compactos);
+            ['active', 'pending'].forEach(function (st) { control.push({ agente: a.nombre, id: a.id, estado: st, helpScout: r.totales[st].helpScout, leidos: r.totales[st].leidos }); });
+          });
+        });
+      }, Promise.resolve());
+    }).then(function () {
+      // 2) Cola sin asignar.
+      if (!E.cfg.mostrarSinAsignar) return null;
+      progreso('Leyendo la cola sin asignar.');
+      return api('/api/abiertos?agente=sin').then(function (r) { guardar(r.compactos); colaCompleta = r.completo; });
+    }).then(function () {
+      // 3) Movimientos de hoy (para el registro de actividad y la última respuesta de cada agente).
+      var leer = function (pagina, vueltas) {
+        progreso('Leyendo los movimientos de hoy (página ' + pagina + ').');
+        return api('/api/cambios?desde=' + encodeURIComponent(E.inicioHoy) + '&pagina=' + pagina).then(function (r) {
+          guardar(r.compactos);
+          return r.siguiente && vueltas < 60 ? leer(r.siguiente, vueltas + 1) : null;
+        });
+      };
+      return leer(1, 0);
+    }).then(function () {
+      E.convs = nuevas;
+      E.cursor = inicio;
+      E.baseEn = Date.now();
+      // Verificación: lo leído debe coincidir con los totales que informa Help Scout,
+      // y los abiertos del panel deben ser exactamente Active + Pending de cada agente.
+      var avisos = [];
+      control.forEach(function (c) {
+        if (c.helpScout != null && c.helpScout !== c.leidos) avisos.push(c.agente + ' (' + c.estado + '): Help Scout informa ' + c.helpScout + ' y se leyeron ' + c.leidos);
+      });
+      if (!colaCompleta) avisos.push('La cola sin asignar tiene más casos de los que se muestran');
+      E.verificacion = {
+        hora: Date.now(), ok: !avisos.length, avisos: avisos,
+        abiertos: control.reduce(function (s, c) { return s + c.leidos; }, 0), control: control,
+      };
+      E.cargandoBase = false;
+    }).catch(function (e) { E.cargandoBase = false; throw e; });
+  }
+
+  // ---------- Actualización incremental ----------
+  function cargarCambios() {
+    var desde = new Date(Date.parse(E.cursor) - 120000).toISOString(); // 2 min de solape
+    var leer = function (pagina, vueltas, cursor) {
+      return api('/api/cambios?desde=' + encodeURIComponent(desde) + '&pagina=' + pagina).then(function (r) {
+        r.compactos.forEach(function (c) { if (relevante(c)) E.convs[c.id] = c; else delete E.convs[c.id]; });
+        cursor = cursor || r.cursor;
+        return r.siguiente && vueltas < 10 ? leer(r.siguiente, vueltas + 1, cursor) : cursor;
+      });
+    };
+    return leer(1, 0, null).then(function (cursor) { E.cursor = cursor; });
+  }
+
+  function cargarReporte() {
+    return api('/api/reporte?desde=' + E.hoy + '&hasta=' + E.hoy).then(function (r) {
+      var porId = {};
+      r.filas.forEach(function (f) { porId[f.id] = f; });
+      E.reporte = { disponible: r.disponible, motivo: r.motivo, porId: porId, hora: Date.now() };
+      E.reporteEn = Date.now();
+    }).catch(function (e) {
+      E.reporte = { disponible: false, motivo: 'No se pudieron leer los reportes de Help Scout: ' + e.message, porId: {}, hora: Date.now() };
+      E.reporteEn = Date.now();
+    });
+  }
+
+  function intervalo() {
+    if (!E.cfg) return 5;
+    return E.enHorario ? E.cfg.segundos : E.cfg.segundosFueraDeHorario;
+  }
+  function ciclo() {
     if (enCurso || pausado) return;
     enCurso = true;
-    servidor('datosPanelEnVivo', undefined, function (texto) { enCurso = false; recibir(leer(texto)); programar(); });
-  }
-  function intervalo() {
-    if (!datos) return 10;
-    return datos.enHorario ? (datos.segundos || 5) : (datos.segundosFueraDeHorario || 60);
+    var cambioDeDia = E.hoy && diaLocal(ahora()) !== E.hoy;
+    var tocaBase = !E.baseEn || cambioDeDia || Date.now() - E.baseEn > E.cfg.minutosRecarga * 60000;
+    var paso = tocaBase ? cargarBase() : cargarCambios();
+    paso.then(function () {
+      if (!E.reporteEn || cambioDeDia || Date.now() - E.reporteEn > E.cfg.segundosReportes * 1000) return cargarReporte();
+    }).then(function () {
+      errorActual = ''; ultimaOk = Date.now();
+      pintar();
+    }).catch(function (e) {
+      errorActual = e.message || String(e);
+      pintarAvisos(); tic();
+    }).then(function () {
+      enCurso = false;
+      programar();
+    });
   }
   function programar() {
     clearTimeout(temporizador);
     if (pausado) return;
-    var s = intervalo();
+    var s = errorActual ? Math.max(15, intervalo()) : intervalo();
     proxima = Date.now() + s * 1000;
-    temporizador = setTimeout(pedir, s * 1000);
+    temporizador = setTimeout(ciclo, s * 1000);
   }
-  var errorActual = '';
-  function recibir(r) {
-    if (!r.ok) {
-      errorActual = r.error || 'Error desconocido';
-      pintarAvisos();
-      if (!datos) $('contenido').innerHTML = '<div class="cargando">Sin datos todavía. Reintentando.</div>';
-      return;
-    }
-    errorActual = '';
-    desfase = Date.parse(r.ahora) - Date.now();
-    datos = r;
-    ultimaOk = Date.now();
-    pintarAvisos();
-    pintar();
+  function arrancar() {
+    E.baseEn = 0; E.reporteEn = 0;
+    ciclo();
   }
+
+  // ---------- Pintado ----------
   function pintarAvisos() {
     var h = '';
     if (errorActual) {
       h += '<div class="aviso error" role="alert"><b>No se pudo leer Help Scout.</b> ' + esc(errorActual) +
-        (datos ? ' Se muestran los últimos datos recibidos (' + hora(ultimaOk + desfase, true) + ').' : '') + '</div>';
+        (ultimaOk ? ' Se muestran los últimos datos recibidos (' + hora(ultimaOk + desfase, true) + ').' : '') + '</div>';
     }
-    if (datos && datos.verificacion && !datos.verificacion.ok) {
-      h += '<div class="aviso error" role="alert"><b>La lectura no cuadra con Help Scout.</b> ' + esc(datos.verificacion.avisos.join(' · ')) + '</div>';
+    if (E.verificacion && !E.verificacion.ok) {
+      h += '<div class="aviso error" role="alert"><b>La lectura no cuadra con Help Scout.</b> ' + esc(E.verificacion.avisos.join(' · ')) + '</div>';
     }
-    if (datos && datos.sinVincular && datos.sinVincular.length) {
-      h += '<div class="aviso">No encontré en Help Scout a: ' + esc(datos.sinVincular.join(', ')) + '. Revisa su email en la configuración (AGENTES).</div>';
+    if (E.reporte && !E.reporte.disponible) {
+      h += '<div class="aviso"><b>Sin reportes del día.</b> ' + esc(E.reporte.motivo) + ' Las columnas "Hoy" quedan vacías; lo que pasa en este momento sí se muestra.</div>';
     }
-    if (demo) h += '<div class="aviso">Vista de demostración con datos de ejemplo. Los datos reales aparecen al abrir la página publicada desde Apps Script.</div>';
+    if (E.sinVincular.length) h += '<div class="aviso">No encontré en Help Scout a: ' + esc(E.sinVincular.join(', ')) + '. Revisa su email en la configuración (AGENTES).</div>';
+    if (DEMO) h += '<div class="aviso">Vista de demostración con datos de ejemplo.</div>';
     $('avisos').innerHTML = h;
   }
-
-  // ---------- Pintado ----------
   function reloj(desde, clases, extra) {
     return '<span class="reloj ' + (clases || '') + '" data-desde="' + esc(desde) + '"' + (extra || '') + '>' + dur((ahora() - Date.parse(desde)) / 1000) + '</span>';
   }
   function ind(l, v, n) { return '<div class="ind"><div class="l">' + esc(l) + '</div><div class="v">' + v + '</div><div class="n">' + esc(n) + '</div></div>'; }
+  function rep(id) { return (E.reporte && E.reporte.disponible && E.reporte.porId[id]) || null; }
+  function sumaRep(campo) {
+    if (!E.reporte || !E.reporte.disponible) return null;
+    return E.agentes.reduce(function (s, a) { var r = rep(a.id); return s + ((r && r[campo]) || 0); }, 0);
+  }
 
   function pintar() {
-    var p = datos.panel, e = p.equipo, viejo = null;
+    pintarAvisos();
+    var p = E.panel = Logica.armarPanel(Object.keys(E.convs).map(function (k) { return E.convs[k]; }), E.agentes, { buzones: E.buzones, mostrarSinAsignar: E.cfg.mostrarSinAsignar, maxFeed: 60 });
+    var e = p.equipo, viejo = null;
     p.agentes.forEach(function (a) { if (a.esperando.length && (!viejo || a.esperando[0].esperaDesde < viejo)) viejo = a.esperando[0].esperaDesde; });
+    var hayRep = E.reporte && E.reporte.disponible;
     var h = '';
     h += '<section class="indicadores" aria-label="Indicadores del equipo">' +
-      ind('Clientes esperando', e.esperando, e.abiertos + ' casos abiertos · ' + e.seguimiento + ' en seguimiento') +
+      ind('Clientes esperando', e.esperando, 'casos asignados con el cliente esperando') +
       ind('Mayor espera', viejo ? reloj(viejo, '', ' data-tono="1"') : '—', viejo ? 'reloj en vivo · hh:mm:ss' : 'nadie esperando') +
-      ind('Respuestas hoy', e.respuestas, 'en ' + e.casosRespondidos + ' casos') +
-      ind('Cerrados hoy', e.cerrados, e.asignados + ' asignados · ' + e.reasignados + ' re-asignados') +
-      ind('Tiempo de respuesta', minTxt(e.promedioRespuestaMin), 'promedio · mediana ' + minTxt(e.medianaRespuestaMin)) +
+      ind('Casos abiertos', e.abiertos, e.activos + ' Active · ' + e.pendientes + ' Pending') +
+      ind('Respuestas hoy', hayRep ? num(sumaRep('totalReplies')) : '—', hayRep ? 'según Reports de Help Scout' : 'reporte no disponible') +
+      ind('Resueltos hoy', hayRep ? num(sumaRep('resolved')) : '—', hayRep ? num(sumaRep('closed')) + ' cerrados · según Reports' : 'reporte no disponible') +
       ind('Sin asignar', p.sinAsignar.length, p.sinAsignar.length ? 'con el cliente esperando' : 'cola vacía') +
       '</section>';
 
-    h += '<section class="seccion"><div class="seccion-cab"><h2>Agentes</h2><p>Jornada del ' + esc(diaLargo(datos.hoy)) +
-      ' · clic en una fila para filtrar la cola</p></div><div class="caja"><div class="desliza"><table class="t-agentes">' +
-      '<thead><tr><th>Agente</th><th class="num grupo-izq">Esperando</th><th class="num">Mayor espera</th><th class="num">Seguimiento</th><th class="num">Abiertos</th>' +
-      '<th class="num grupo-izq">Asignados</th><th class="num">Respuestas</th><th class="num">Casos</th><th class="num">Cerrados</th><th class="num">Re-asig.</th>' +
-      '<th class="num grupo-izq">T. respuesta</th><th class="num">1ª respuesta</th><th class="num">Últ. respuesta</th><th></th></tr></thead><tbody>' +
-      p.agentes.map(filaAgente).join('') + '</tbody><tfoot><tr><td>Equipo</td>' +
+    h += '<section class="seccion"><div class="seccion-cab"><h2>Agentes</h2><p>' + esc(diaLargo(E.hoy)) + ' · clic en una fila para filtrar la cola</p></div>' +
+      '<div class="caja"><div class="desliza"><table class="t-agentes"><thead>' +
+      '<tr class="grupos"><th></th><th colspan="4" class="grupo-izq">En este momento</th><th colspan="7" class="grupo-izq">Hoy · Reports de Help Scout' +
+      (hayRep ? ' · ' + hora(E.reporte.hora + desfase, false) : '') + '</th><th colspan="2" class="grupo-izq"></th></tr>' +
+      '<tr><th>Agente</th><th class="num grupo-izq">Esperando</th><th class="num">Mayor espera</th><th class="num">Seguimiento</th><th class="num">Abiertos</th>' +
+      '<th class="num grupo-izq">Respuestas</th><th class="num">Conversaciones</th><th class="num">Clientes</th><th class="num">Resueltos</th><th class="num">Cerrados</th><th class="num">T. respuesta</th><th class="num">T. resolución</th>' +
+      '<th class="num grupo-izq">Últ. respuesta</th><th></th></tr></thead><tbody>' + p.agentes.map(filaAgente).join('') + '</tbody><tfoot><tr><td>Equipo</td>' +
       '<td class="num grupo-izq">' + e.esperando + '</td><td class="num">' + (viejo ? reloj(viejo, '', ' data-tono="1"') : '—') + '</td><td class="num">' + e.seguimiento + '</td><td class="num">' + e.abiertos + '</td>' +
-      '<td class="num grupo-izq">' + e.asignados + '</td><td class="num">' + e.respuestas + '</td><td class="num">' + e.casosRespondidos + '</td><td class="num">' + e.cerrados + '</td><td class="num">' + e.reasignados + '</td>' +
-      '<td class="num grupo-izq">' + minTxt(e.promedioRespuestaMin) + '</td><td class="num">' + minTxt(e.promedioPrimeraMin) + '</td><td></td><td></td></tr></tfoot></table></div></div></section>';
+      '<td class="num grupo-izq">' + num(sumaRep('totalReplies')) + '</td><td class="num">' + num(sumaRep('totalConversations')) + '</td><td class="num">' + num(sumaRep('customersHelped')) + '</td><td class="num">' + num(sumaRep('resolved')) + '</td><td class="num">' + num(sumaRep('closed')) + '</td>' +
+      '<td class="num tenue">—</td><td class="num tenue">—</td><td class="grupo-izq"></td><td></td></tr></tfoot></table></div></div></section>';
 
     h += '<section class="seccion dos"><div class="col-a"><div class="seccion-cab"><h2>Clientes esperando respuesta</h2><p>Del que más espera al más reciente · meta ' +
-      datos.metaRespuestaMin + ' min</p></div><div class="caja" id="cola"></div></div>' +
-      '<div class="col-b"><div class="seccion-cab"><h2>Registro de actividad</h2><p>Últimos ' + p.feed.length + ' movimientos</p></div><div class="caja">' + registro(p.feed) + '</div></div></section>';
+      E.cfg.metaRespuestaMin + ' min</p></div><div class="caja" id="cola"></div></div>' +
+      '<div class="col-b"><div class="seccion-cab"><h2>Registro de actividad</h2><p>Hoy · ' + p.movimientos + ' movimientos</p></div><div class="caja">' + registro(p.feed) + '</div></div></section>';
 
-    var v = datos.verificacion;
-    h += '<footer class="pie"><span>Horario ' + datos.horario.inicio + ':00–' + datos.horario.fin + ':00 (' + esc(tz()) + ') · tiempos de respuesta en horario laboral · relojes de espera en tiempo real</span>' +
-      '<span>' + (v ? (v.ok ? 'Verificado con Help Scout ' : 'Lectura con diferencias ') + hora(Date.parse(v.hora), true) + ' · ' + v.casosAbiertos + ' casos abiertos · ' + v.casosDelDia + ' casos con movimiento' : '') + '</span></footer>';
+    var v = E.verificacion;
+    h += '<footer class="pie"><span>Zona horaria ' + esc(tz()) + ' · jornada ' + E.cfg.horario.inicio + ':00–' + E.cfg.horario.fin + ':00 · los relojes de espera corren en tiempo real</span>' +
+      '<span>' + (v ? (v.ok ? 'Verificado con Help Scout ' : 'Lectura con diferencias ') + hora(v.hora + desfase, true) + ' · ' + v.abiertos + ' casos abiertos leídos' : '') + '</span></footer>';
 
     $('contenido').innerHTML = h;
     todos('.t-agentes tbody tr[data-id]').forEach(function (tr) {
@@ -386,39 +678,34 @@ dialog::backdrop { background: rgba(0, 0, 0, .66); }
         marcar(); pintarCola();
       });
     });
-    todos('[data-detalle]').forEach(function (b) { b.addEventListener('click', function () { abrirDetalle(b.getAttribute('data-detalle'), b.getAttribute('data-nombre')); }); });
+    todos('[data-detalle]').forEach(function (b) { b.addEventListener('click', function () { abrirDetalle(Number(b.getAttribute('data-detalle'))); }); });
     marcar();
     pintarCola();
     tic();
   }
 
   function filaAgente(a) {
-    if (!a.vinculado || !a.hoy) {
-      return '<tr><td class="nombre">' + esc(a.nombre) + '</td><td colspan="13" class="tenue">No está vinculada con un usuario de Help Scout</td></tr>';
-    }
-    var h = a.hoy, viejo = a.esperando.length ? a.esperando[0].esperaDesde : null;
+    if (!a.vinculado) return '<tr><td class="nombre">' + esc(a.nombre) + '</td><td colspan="13" class="tenue">No está vinculada con un usuario de Help Scout</td></tr>';
+    var r = rep(a.id) || {}, viejo = a.esperando.length ? a.esperando[0].esperaDesde : null;
     return '<tr data-id="' + a.id + '">' +
-      '<td><div class="nombre">' + esc(a.nombre) + '</div>' +
-      '<span class="est tenue" data-ultima="' + esc(h.ultimaRespuesta || '') + '" data-esperando="' + a.esperando.length + '"><i></i><span>—</span></span></td>' +
+      '<td><div class="nombre">' + esc(a.nombre) + '</div><span class="est tenue" data-ultima="' + esc(a.ultimaRespuesta || '') + '" data-esperando="' + a.esperando.length + '"><i></i><span>—</span></span></td>' +
       '<td class="num fuerte grupo-izq">' + a.esperando.length + '</td>' +
       '<td class="num">' + (viejo ? reloj(viejo, '', ' data-tono="1"') : '<span class="tenue">—</span>') + '</td>' +
       '<td class="num">' + a.seguimiento + '</td><td class="num">' + a.abiertos + '</td>' +
-      '<td class="num grupo-izq">' + h.asignados + '</td><td class="num">' + h.respuestas + '</td><td class="num">' + h.casosRespondidos + '</td><td class="num">' + h.cerrados + '</td><td class="num">' + h.reasignados + '</td>' +
-      '<td class="num grupo-izq">' + minTxt(h.promedioRespuestaMin) + '</td><td class="num">' + minTxt(h.promedioPrimeraMin) + '</td>' +
-      '<td class="num">' + (h.ultimaRespuesta ? 'hace <span class="reloj" data-desde="' + esc(h.ultimaRespuesta) + '" data-corto="1">' + corto((ahora() - Date.parse(h.ultimaRespuesta)) / 1000) + '</span>' : '<span class="tenue">sin respuestas hoy</span>') + '</td>' +
-      '<td class="num"><button type="button" class="btn chico" data-detalle="' + a.id + '" data-nombre="' + esc(a.nombre) + '">Detalle</button></td></tr>';
+      '<td class="num grupo-izq">' + num(r.totalReplies) + '</td><td class="num">' + num(r.totalConversations) + '</td><td class="num">' + num(r.customersHelped) + '</td><td class="num">' + num(r.resolved) + '</td><td class="num">' + num(r.closed) + '</td>' +
+      '<td class="num">' + corto(r.responseTime) + '</td><td class="num">' + corto(r.resolutionTime) + '</td>' +
+      '<td class="num grupo-izq">' + (a.ultimaRespuesta ? 'hace <span class="reloj" data-desde="' + esc(a.ultimaRespuesta) + '" data-corto="1">' + corto((ahora() - Date.parse(a.ultimaRespuesta)) / 1000) + '</span>' : '<span class="tenue">sin respuestas hoy</span>') + '</td>' +
+      '<td class="num"><button type="button" class="btn chico" data-detalle="' + a.id + '">Detalle</button></td></tr>';
   }
-  function marcar() {
-    todos('.t-agentes tbody tr[data-id]').forEach(function (tr) { tr.classList.toggle('sel', tr.getAttribute('data-id') === String(filtro)); });
-  }
+  function marcar() { todos('.t-agentes tbody tr[data-id]').forEach(function (tr) { tr.classList.toggle('sel', tr.getAttribute('data-id') === String(filtro)); }); }
 
   function pintarCola() {
-    var p = datos.panel, filas = [];
+    var p = E.panel, filas = [];
     p.agentes.forEach(function (a) { a.esperando.forEach(function (t) { filas.push(t); }); });
     p.sinAsignar.forEach(function (t) { filas.push(t); });
     var pest = [{ id: 'todos', t: 'Todos', n: filas.length }]
       .concat(p.agentes.filter(function (a) { return a.vinculado; }).map(function (a) { return { id: String(a.id), t: a.nombre, n: a.esperando.length }; }))
-      .concat([{ id: 'sin', t: 'Sin asignar', n: p.sinAsignar.length }]);
+      .concat(E.cfg.mostrarSinAsignar ? [{ id: 'sin', t: 'Sin asignar', n: p.sinAsignar.length }] : []);
     if (!pest.some(function (x) { return x.id === String(filtro); })) filtro = 'todos';
     var visibles = filas.filter(function (t) {
       return filtro === 'todos' || (filtro === 'sin' ? !t.agenteId : String(t.agenteId) === String(filtro));
@@ -427,15 +714,13 @@ dialog::backdrop { background: rgba(0, 0, 0, .66); }
       var sel = String(filtro) === x.id;
       return '<button type="button" role="tab" aria-selected="' + sel + '" class="pest' + (sel ? ' sel' : '') + '" data-f="' + x.id + '">' + esc(x.t) + '<span>' + x.n + '</span></button>';
     }).join('') + '</div>';
-    if (!visibles.length) {
-      h += '<div class="vacio">Ningún cliente está esperando respuesta.</div>';
-    } else {
+    if (!visibles.length) h += '<div class="vacio">Ningún cliente está esperando respuesta.</div>';
+    else {
       h += '<div class="desliza"><table class="t-cola"><thead><tr><th>Espera</th><th>Caso</th><th>Asunto</th><th>Cliente</th><th>Agente</th><th>Estado en Help Scout</th></tr></thead><tbody>' +
         visibles.map(function (t) {
           return '<tr><td>' + reloj(t.esperaDesde, 'espera', ' data-tono="1" data-barra="1"') + '<span class="barra"><i></i></span></td>' +
             '<td><a href="' + esc(t.url) + '" target="_blank" rel="noopener"><b>#' + esc(t.numero) + '</b></a></td>' +
-            '<td class="asunto" title="' + esc(t.asunto) + '">' + esc(t.asunto) + '</td>' +
-            '<td class="tenue">' + esc(t.cliente || '—') + '</td>' +
+            '<td class="asunto" title="' + esc(t.asunto) + '">' + esc(t.asunto) + '</td><td class="tenue">' + esc(t.cliente || '—') + '</td>' +
             '<td>' + (t.agenteId ? esc(t.agente) : '<span class="bad">Sin asignar</span>') + '</td>' +
             '<td class="tenue">' + (t.estado === 'pending' ? 'Pending' : 'Active') + (t.buzon ? ' · ' + esc(t.buzon) : '') + '</td></tr>';
         }).join('') + '</tbody></table></div>';
@@ -445,61 +730,45 @@ dialog::backdrop { background: rgba(0, 0, 0, .66); }
     tic();
   }
 
-  var TIPOS = {
-    RESPUESTA: ['Respuesta', 'ok'], CLIENTE: ['Cliente', 'warn'], ASIGNADO: ['Asignado', ''], CERRADO: ['Cerrado', 'ok'],
-    REASIGNADO: ['Re-asignado', 'tenue'], NUEVA_CONSULTA: ['Consulta', 'warn'], PRIMERA_RESPUESTA: ['1ª respuesta', 'ok'],
-  };
+  var TIPOS = { RESPUESTA: ['Respuesta', 'ok'], CLIENTE: ['Cliente', 'warn'], ASIGNADO: ['Asignado', ''], CERRADO: ['Cerrado', 'ok'] };
   function textoMovimiento(f) {
-    var caso = '<a href="' + esc(f.url) + '" target="_blank" rel="noopener"><b>#' + esc(f.numero) + '</b></a>';
-    var ag = esc(f.agente || '');
-    if (f.tipo === 'RESPUESTA') return ag + ' respondió ' + caso + (f.minutos != null ? ' <span class="tenue">en ' + minTxt(f.minutos) + '</span>' : '');
+    var caso = '<a href="' + esc(f.url) + '" target="_blank" rel="noopener"><b>#' + esc(f.numero) + '</b></a>', ag = esc(f.agente || '');
+    if (f.tipo === 'RESPUESTA') return ag + ' respondió ' + caso;
     if (f.tipo === 'CLIENTE') return 'El cliente escribió en ' + caso + (ag ? ' <span class="tenue">· ' + ag + '</span>' : ' <span class="bad">· sin asignar</span>');
     if (f.tipo === 'ASIGNADO') return caso + ' asignado a ' + ag;
-    if (f.tipo === 'CERRADO') return ag + ' cerró ' + caso;
-    if (f.tipo === 'REASIGNADO') return ag + ' re-asignó ' + caso;
-    if (f.tipo === 'NUEVA_CONSULTA') return 'Nueva consulta en ' + caso + ' <span class="tenue">· ' + ag + '</span>';
-    return ag + ' ' + caso;
+    return ag + ' cerró ' + caso;
   }
   function registro(items) {
-    if (!items.length) return '<div class="vacio">Todavía no hay movimientos en esta jornada.</div>';
+    if (!items.length) return '<div class="vacio">Todavía no hay movimientos hoy.</div>';
     return '<ol class="registro">' + items.map(function (f) {
-      var t = TIPOS[f.tipo] || [f.tipo, ''];
+      var t = TIPOS[f.tipo];
       return '<li><time>' + esc(hora(Date.parse(f.fecha), false)) + '</time><span class="tipo ' + t[1] + '">' + esc(t[0]) + '</span>' +
         '<span class="txt">' + textoMovimiento(f) + '<small>' + esc(f.asunto || '') + '</small></span></li>';
     }).join('') + '</ol>';
   }
-  function diaLargo(d) {
-    try { return new Date(d + 'T12:00:00Z').toLocaleDateString('es', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' }); } catch (e) { return d; }
-  }
 
   // ---------- Cada segundo ----------
-  function conexion(clase, texto) {
-    var el = $('conexion');
-    el.className = 'estado-con ' + clase;
-    el.lastElementChild.textContent = texto;
-  }
+  function conexion(clase, texto) { var el = $('conexion'); el.className = 'estado-con ' + clase; el.lastElementChild.textContent = texto; }
   function tic() {
     var t = ahora();
     $('reloj').textContent = hora(t, true);
-    if (!datos) { if (errorActual) conexion('bad', 'Sin conexión'); return; }
+    if (!E.cfg || !ultimaOk) { conexion(errorActual ? 'bad' : 'tenue', errorActual ? 'Sin conexión' : 'Conectando'); return; }
     var hace = Math.max(0, Math.floor((Date.now() - ultimaOk) / 1000));
-    var atrasado = hace > Math.max(30, intervalo() * 4);
-    $('actualizado').textContent = pausado ? 'En pausa · datos de hace ' + corto(hace)
-      : 'Actualizado hace ' + corto(hace) + ' · cada ' + intervalo() + ' s';
+    var atrasado = !E.cargandoBase && hace > Math.max(45, intervalo() * 6);
+    $('actualizado').textContent = pausado ? 'En pausa · datos de hace ' + corto(hace) : 'Actualizado hace ' + corto(hace) + ' · cada ' + intervalo() + ' s';
     if (pausado) conexion('warn', 'En pausa');
     else if (errorActual || atrasado) conexion('bad', 'Sin conexión');
-    else if (!datos.enHorario) conexion('tenue', 'Fuera de horario');
+    else if (!E.enHorario) conexion('tenue', 'Fuera de horario');
     else conexion('ok', 'En vivo');
     $('avance').style.width = pausado ? '0' : Math.min(100, Math.max(0, 100 - (proxima - Date.now()) / (intervalo() * 1000) * 100)) + '%';
 
-    var meta = datos.metaRespuestaMin || 60;
+    var meta = E.cfg.metaRespuestaMin;
     todos('.reloj[data-desde]').forEach(function (el) {
       var seg = (t - Date.parse(el.getAttribute('data-desde'))) / 1000;
       el.textContent = el.getAttribute('data-corto') ? corto(seg) : dur(seg);
       if (el.getAttribute('data-tono')) {
         var c = tono(seg / 60);
-        el.classList.remove('ok', 'warn', 'bad');
-        el.classList.add(c);
+        el.classList.remove('ok', 'warn', 'bad'); el.classList.add(c);
         if (el.getAttribute('data-barra')) {
           var b = el.parentNode.querySelector('.barra');
           b.className = 'barra ' + c;
@@ -507,12 +776,12 @@ dialog::backdrop { background: rgba(0, 0, 0, .66); }
         }
       }
     });
-    var alerta = datos.alertaSinResponderMin || [10, 30];
+    var alerta = E.cfg.alertaSinResponderMin;
     todos('.est[data-esperando]').forEach(function (el) {
       var esperando = Number(el.getAttribute('data-esperando')), ultima = el.getAttribute('data-ultima');
       var min = ultima ? (t - Date.parse(ultima)) / 60000 : Infinity, clase, texto;
       if (!esperando) { clase = 'ok'; texto = 'Al día'; }
-      else if (!datos.enHorario) { clase = 'tenue'; texto = 'Fuera de horario'; }
+      else if (!E.enHorario) { clase = 'tenue'; texto = 'Fuera de horario'; }
       else if (min < alerta[0]) { clase = 'ok'; texto = 'Respondiendo'; }
       else if (min < alerta[1]) { clase = 'warn'; texto = 'Sin responder ' + Math.floor(min) + ' min'; }
       else { clase = 'bad'; texto = ultima ? 'Sin responder ' + corto(min * 60) : 'Sin responder hoy'; }
@@ -522,157 +791,165 @@ dialog::backdrop { background: rgba(0, 0, 0, .66); }
   }
 
   // ---------- Detalle de una agente ----------
-  function abrirDetalle(id, nombre) {
-    $('tituloDetalle').textContent = nombre;
-    $('subDetalle').textContent = 'Cada cifra de la tabla sale de estas listas.';
-    $('cuerpoDetalle').innerHTML = '<div class="vacio">Cargando.</div>';
-    $('dlgDetalle').showModal();
-    servidor('detalleAgentePanel', id, function (texto) {
-      var d = leer(texto);
-      if (!d.ok) { $('cuerpoDetalle').innerHTML = '<div class="aviso error">' + esc(d.error) + '</div>'; return; }
-      var cuenta = function (tipo) { return d.movimientos.filter(function (m) { return m.tipo === tipo; }).length; };
-      var unicos = function (tipo) { var s = {}; d.movimientos.forEach(function (m) { if (m.tipo === tipo) s[m.numero] = 1; }); return Object.keys(s).length; };
-      var esperando = d.abiertos.filter(function (x) { return x.esperaDesde; }).length;
-      var h = '<div class="resumen-dlg">' +
-        '<div><b>' + esperando + '</b><span>Esperando</span></div><div><b>' + (d.abiertos.length - esperando) + '</b><span>En seguimiento</span></div>' +
-        '<div><b>' + unicos('ASIGNADO') + '</b><span>Asignados</span></div><div><b>' + cuenta('RESPUESTA') + '</b><span>Respuestas</span></div>' +
-        '<div><b>' + unicos('CERRADO') + '</b><span>Cerrados</span></div><div><b>' + unicos('REASIGNADO') + '</b><span>Re-asignados</span></div></div>';
-      h += '<div class="previa"><h4>Casos abiertos (' + d.abiertos.length + ')</h4><div class="caja"><div class="desliza"><table><thead><tr><th>Caso</th><th>Asunto</th><th>Cliente</th><th>Estado</th><th>Cliente espera desde</th></tr></thead><tbody>' +
-        (d.abiertos.map(function (x) {
-          return '<tr><td><a href="' + esc(x.url) + '" target="_blank" rel="noopener"><b>#' + esc(x.numero) + '</b></a></td><td class="asunto">' + esc(x.asunto) + '</td><td class="tenue">' + esc(x.cliente) +
-            '</td><td class="tenue">' + (x.estado === 'pending' ? 'Pending' : 'Active') + '</td><td>' + (x.esperaDesde ? esc(hora(Date.parse(x.esperaDesde), true)) + ' · ' + corto((ahora() - Date.parse(x.esperaDesde)) / 1000) : '<span class="tenue">respondido, en seguimiento</span>') + '</td></tr>';
-        }).join('') || '<tr><td colspan="5" class="vacio">Sin casos abiertos.</td></tr>') + '</tbody></table></div></div></div>';
-      h += '<div class="previa"><h4>Movimientos de la jornada (' + d.movimientos.length + ')</h4><div class="caja"><div class="desliza"><table><thead><tr><th>Hora</th><th>Movimiento</th><th>Caso</th><th>Asunto</th><th class="num">Minutos laborales</th></tr></thead><tbody>' +
-        (d.movimientos.map(function (m) {
-          var t = TIPOS[m.tipo] || [m.tipo, ''];
-          return '<tr><td>' + esc(hora(Date.parse(m.fecha), true)) + '</td><td class="' + t[1] + '">' + esc(t[0]) + '</td><td><a href="' + esc(m.url) + '" target="_blank" rel="noopener"><b>#' + esc(m.numero) +
-            '</b></a></td><td class="asunto">' + esc(m.asunto) + '</td><td class="num">' + (m.minutos == null ? '<span class="tenue">—</span>' : m.minutos) + '</td></tr>';
-        }).join('') || '<tr><td colspan="5" class="vacio">Sin movimientos.</td></tr>') + '</tbody></table></div></div></div>';
-      $('cuerpoDetalle').innerHTML = h;
+  function abrirDetalle(id) {
+    var a = E.panel.agentes.filter(function (x) { return x.id === id; })[0];
+    if (!a) return;
+    var r = rep(id);
+    var movs = [];
+    Object.keys(E.convs).forEach(function (k) {
+      var c = E.convs[k];
+      c.mv.forEach(function (m) {
+        if (m[0] !== 'C' && m[1] === id) movs.push({ fecha: m[2], tipo: { R: 'RESPUESTA', X: 'CERRADO', A: 'ASIGNADO' }[m[0]], numero: c.n, asunto: c.s, url: 'https://secure.helpscout.net/conversation/' + c.id + '/' + c.n });
+      });
     });
+    movs.sort(function (x, y) { return x.fecha < y.fecha ? 1 : -1; });
+    $('tituloDetalle').textContent = a.nombre;
+    $('subDetalle').textContent = 'Casos y movimientos de hoy, con enlace a Help Scout para comprobarlos.';
+    var caja = function (v, l) { return '<div><b>' + v + '</b><span>' + l + '</span></div>'; };
+    var h = '<div class="resumen-dlg">' + caja(a.esperando.length, 'Esperando') + caja(a.seguimiento, 'En seguimiento') + caja(a.activos, 'Active') + caja(a.pendientes, 'Pending') +
+      caja(a.respuestasVistas, 'Respuestas vistas hoy') + caja(r ? num(r.totalReplies) : '—', 'Respuestas según Reports') + '</div>' +
+      '<p class="fuente">"Respuestas vistas" es el conteo directo de mensajes enviados hoy en los casos leídos; "según Reports" es la cifra oficial de Help Scout, que puede tardar unos minutos en actualizarse.</p>';
+    var filaCaso = function (x) {
+      return '<tr><td><a href="' + esc(x.url) + '" target="_blank" rel="noopener"><b>#' + esc(x.numero) + '</b></a></td><td class="asunto">' + esc(x.asunto) + '</td><td class="tenue">' + esc(x.cliente) +
+        '</td><td class="tenue">' + (x.estado === 'pending' ? 'Pending' : 'Active') + '</td><td>' + (x.esperaDesde ? esc(hora(Date.parse(x.esperaDesde), true)) + ' · ' + corto((ahora() - Date.parse(x.esperaDesde)) / 1000) : '<span class="tenue">respondido, espera al cliente</span>') + '</td></tr>';
+    };
+    var abiertos = a.esperando.concat(a.enSeguimiento);
+    h += '<div class="previa"><h4>Casos abiertos (' + abiertos.length + ')</h4><div class="caja"><div class="desliza"><table><thead><tr><th>Caso</th><th>Asunto</th><th>Cliente</th><th>Estado</th><th>Cliente espera desde</th></tr></thead><tbody>' +
+      (abiertos.map(filaCaso).join('') || '<tr><td colspan="5" class="vacio">Sin casos abiertos.</td></tr>') + '</tbody></table></div></div></div>';
+    h += '<div class="previa"><h4>Movimientos de hoy (' + movs.length + ')</h4><div class="caja"><div class="desliza"><table><thead><tr><th>Hora</th><th>Movimiento</th><th>Caso</th><th>Asunto</th></tr></thead><tbody>' +
+      (movs.map(function (m) {
+        var t = TIPOS[m.tipo];
+        return '<tr><td>' + esc(hora(Date.parse(m.fecha), true)) + '</td><td class="' + t[1] + '">' + esc(t[0]) + '</td><td><a href="' + esc(m.url) + '" target="_blank" rel="noopener"><b>#' + esc(m.numero) + '</b></a></td><td class="asunto">' + esc(m.asunto) + '</td></tr>';
+      }).join('') || '<tr><td colspan="4" class="vacio">Sin movimientos hoy.</td></tr>') + '</tbody></table></div></div></div>';
+    $('cuerpoDetalle').innerHTML = h;
+    $('dlgDetalle').showModal();
   }
 
   // ---------- Exportar ----------
-  function hoyLocal() {
-    try { return new Intl.DateTimeFormat('en-CA', { timeZone: tz(), year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ahora())); }
-    catch (e) { return new Date(ahora()).toISOString().slice(0, 10); }
-  }
   function sumarDias(d, n) { var f = new Date(d + 'T12:00:00Z'); f.setUTCDate(f.getUTCDate() + n); return f.toISOString().slice(0, 10); }
   function rango(tipo) {
-    var hoy = hoyLocal(), f = new Date(hoy + 'T12:00:00Z'), lunes = sumarDias(hoy, -((f.getUTCDay() + 6) % 7));
-    var mes1 = hoy.slice(0, 8) + '01';
+    var hoy = diaLocal(ahora()), f = new Date(hoy + 'T12:00:00Z'), lunes = sumarDias(hoy, -((f.getUTCDay() + 6) % 7)), mes1 = hoy.slice(0, 8) + '01';
     if (tipo === 'hoy') return [hoy, hoy];
     if (tipo === 'ayer') return [sumarDias(hoy, -1), sumarDias(hoy, -1)];
     if (tipo === 'semana') return [lunes, hoy];
     if (tipo === 'semanaPasada') return [sumarDias(lunes, -7), sumarDias(lunes, -1)];
     if (tipo === 'mes') return [mes1, hoy];
     if (tipo === 'mesPasado') { var fin = sumarDias(mes1, -1); return [fin.slice(0, 8) + '01', fin]; }
-    if (tipo === 'todo') return [(datos && datos.fechaInicio) || '2026-01-01', hoy];
+    if (tipo === '90') return [sumarDias(hoy, -89), hoy];
     return null;
   }
-  function aplicarPeriodo() {
-    var r = rango($('expPeriodo').value);
-    if (r) { $('expDesde').value = r[0]; $('expHasta').value = r[1]; }
-  }
-  function filtrosExportar() {
-    return {
-      desde: $('expDesde').value, hasta: $('expHasta').value,
-      agentes: todos('#expAgentes input:checked').map(function (i) { return i.value; }),
-      tipos: todos('#expTipos input:checked').map(function (i) { return i.value; }),
-    };
-  }
+  function aplicarPeriodo() { var r = rango($('expPeriodo').value); if (r) { $('expDesde').value = r[0]; $('expHasta').value = r[1]; } }
   function abrirExportar() {
-    var nombres = (datos && datos.agentes) || [];
+    if (!E.cfg) return;
     if (!$('expAgentes').children.length) {
-      $('expAgentes').innerHTML = nombres.map(function (n) { return '<label><input type="checkbox" value="' + esc(n) + '" checked> ' + esc(n) + '</label>'; }).join('');
-      if (datos && datos.fechaInicio) { $('expDesde').min = datos.fechaInicio; $('expHasta').min = datos.fechaInicio; }
+      $('expAgentes').innerHTML = E.agentes.filter(function (a) { return a.id; }).map(function (a) {
+        return '<label><input type="checkbox" value="' + a.id + '" checked> ' + esc(a.nombre) + '</label>';
+      }).join('');
+      $('expOficina').checked = !!E.cfg.horarioDeOficina;
       aplicarPeriodo();
     }
-    $('expPrevia').innerHTML = '';
-    $('expEstado').textContent = '';
-    reporte = null;
+    $('expPrevia').innerHTML = ''; $('expEstado').textContent = ''; exportacion = null;
     $('dlgExportar').showModal();
   }
-  function pedirReporte(despues) {
-    var f = filtrosExportar();
+  function botones(activos) { ['expVer', 'expExcel', 'expCsv'].forEach(function (id) { $(id).disabled = !activos; }); }
+  function pedirExportacion(conCasos, despues) {
+    var f = {
+      desde: $('expDesde').value, hasta: $('expHasta').value, oficina: $('expOficina').checked,
+      agentes: todos('#expAgentes input:checked').map(function (i) { return Number(i.value); }),
+      series: $('expSeries').checked, casos: conCasos && $('expCasos').checked,
+    };
     if (!f.desde || !f.hasta || f.desde > f.hasta) { $('expEstado').textContent = 'Revisa las fechas.'; return; }
     if (!f.agentes.length) { $('expEstado').textContent = 'Elige al menos una agente.'; return; }
-    $('expEstado').textContent = 'Calculando.';
-    ['expVer', 'expExcel', 'expCsv'].forEach(function (id) { $(id).disabled = true; });
-    servidor('reporteMetricas', f, function (texto) {
-      ['expVer', 'expExcel', 'expCsv'].forEach(function (id) { $(id).disabled = false; });
-      var r = leer(texto);
-      if (!r.ok) { $('expEstado').textContent = ''; $('expPrevia').innerHTML = '<div class="aviso error">' + esc(r.error) + '</div>'; return; }
-      reporte = r;
-      $('expEstado').textContent = r.porDia.length + ' filas por día · ' + r.detalle.length + ' movimientos';
+    var qs = '?desde=' + f.desde + '&hasta=' + f.hasta + '&agentes=' + f.agentes.join(',') + '&oficina=' + (f.oficina ? 1 : 0);
+    var x = { filtros: f, resumen: null, series: null, casos: null, generado: Date.now() };
+    botones(false);
+    $('expEstado').textContent = 'Consultando los reportes de Help Scout.';
+    api('/api/reporte' + qs).then(function (r) {
+      if (!r.disponible) throw new Error(r.motivo);
+      x.resumen = r;
+      if (!f.series) return null;
+      $('expEstado').textContent = 'Leyendo la evolución por periodo.';
+      return api('/api/reporte-dias' + qs).then(function (s) { x.series = s; });
+    }).then(function () {
+      if (!f.casos) return null;
+      x.casos = [];
+      return f.agentes.reduce(function (cadena, id) {
+        return cadena.then(function () {
+          var leer = function (pagina) {
+            return api('/api/reporte-casos' + qs + '&agente=' + id + '&pagina=' + pagina).then(function (c) {
+              c.filas.forEach(function (fila) { fila.agente = c.nombre; x.casos.push(fila); });
+              $('expEstado').textContent = 'Leyendo conversaciones de ' + c.nombre + ' (' + x.casos.length + ').';
+              return c.siguiente ? leer(c.siguiente) : null;
+            });
+          };
+          return leer(1);
+        });
+      }, Promise.resolve());
+    }).then(function () {
+      exportacion = x;
+      $('expEstado').textContent = 'Listo.';
       pintarPrevia();
       if (despues) despues();
-    });
+    }).catch(function (e) {
+      $('expEstado').textContent = '';
+      $('expPrevia').innerHTML = '<div class="aviso error">' + esc(e.message) + '</div>';
+    }).then(function () { botones(true); });
   }
-  var pct = function (v) { return v == null ? '—' : Math.round(v * 100) + '%'; };
-  var nv = function (v) { return v == null ? '—' : v.toLocaleString('es'); };
+  var fraccion = function (v) { return v == null ? null : (v > 1 ? v / 100 : v); };
+  var pct = function (v) { v = fraccion(v); return v == null ? '—' : Math.round(v * 100) + '%'; };
+  function total(filas, campo) { return filas.reduce(function (s, f) { return s + (f[campo] || 0); }, 0); }
   function pintarPrevia() {
-    var r = reporte;
-    var h = '';
-    if (r.sincronizacionIncompleta) h += '<div class="aviso">La sincronización con Help Scout todavía está leyendo el historial: las cifras pueden estar incompletas.</div>';
-    h += '<div class="previa"><h4>Resumen por agente · ' + esc(r.filtros.desde) + ' a ' + esc(r.filtros.hasta) + '</h4><div class="caja"><div class="desliza"><table><thead><tr>' +
-      '<th>Agente</th><th class="num">Días</th><th class="num">Asignados</th><th class="num">Nuevas cons.</th><th class="num">Re-asig.</th><th class="num">Total</th><th class="num">Cerrados</th><th class="num">% Resol.</th>' +
-      '<th class="num">Respuestas</th><th class="num">T. resp. prom.</th><th class="num">Mediana</th><th class="num">% en meta</th><th class="num">1ª resp.</th><th class="num">Resolución</th></tr></thead><tbody>' +
-      r.porAgente.slice(0, -1).map(filaPrevia).join('') + '</tbody><tfoot>' + filaPrevia(r.porAgente[r.porAgente.length - 1]) + '</tfoot></table></div></div>' +
-      '<p class="tenue" style="margin:10px 0 0;font-size:12px">Sincronizado con Help Scout: ' + esc(r.ultimaSincronizacion || 'nunca') +
-      ' · historial desde ' + esc(r.fechaInicio) + '. El archivo incluye además el detalle por día, cada movimiento con su enlace y las definiciones.</p></div>';
-    $('expPrevia').innerHTML = h;
-  }
-  function filaPrevia(a) {
-    return '<tr><td class="nombre">' + esc(a.agente === 'EQUIPO' ? 'Equipo' : a.agente) + '</td><td class="num">' + a.dias + '</td><td class="num">' + a.asignados + '</td><td class="num">' + a.nuevaConsulta +
-      '</td><td class="num">' + a.reasignados + '</td><td class="num">' + a.total + '</td><td class="num">' + a.cerrados + '</td><td class="num">' + pct(a.pctResolucion) + '</td><td class="num">' + a.respuestas +
-      '</td><td class="num">' + minTxt(a.respuestaPromMin) + '</td><td class="num">' + minTxt(a.respuestaMedianaMin) + '</td><td class="num">' + pct(a.respuestaEnMeta) + '</td><td class="num">' + minTxt(a.primeraPromMin) +
-      '</td><td class="num">' + (a.resolucionPromH == null ? '—' : nv(a.resolucionPromH) + ' h') + '</td></tr>';
+    var r = exportacion.resumen;
+    var fila = function (f) {
+      return '<tr><td class="nombre">' + esc(f.nombre) + '</td><td class="num">' + num(f.totalConversations) + '</td><td class="num">' + num(f.customersHelped) + '</td><td class="num">' + num(f.totalReplies) +
+        '</td><td class="num">' + num(f.repliesPerDay) + '</td><td class="num">' + num(f.resolved) + '</td><td class="num">' + pct(f.percentResolvedOnFirstReply) + '</td><td class="num">' + num(f.closed) +
+        '</td><td class="num">' + corto(f.responseTime) + '</td><td class="num">' + corto(f.resolutionTime) + '</td><td class="num">' + corto(f.handleTime) + '</td><td class="num">' + num(f.happinessScore) + '</td></tr>';
+    };
+    $('expPrevia').innerHTML = '<div class="previa"><h4>Resumen por agente · ' + esc(r.rango.desde) + ' a ' + esc(r.rango.hasta) + '</h4><div class="caja"><div class="desliza"><table><thead><tr>' +
+      '<th>Agente</th><th class="num">Conversaciones</th><th class="num">Clientes</th><th class="num">Respuestas</th><th class="num">Resp. por día</th><th class="num">Resueltos</th><th class="num">% en 1ª resp.</th><th class="num">Cerrados</th>' +
+      '<th class="num">T. respuesta</th><th class="num">T. resolución</th><th class="num">T. gestión</th><th class="num">Felicidad</th></tr></thead><tbody>' + r.filas.map(fila).join('') + '</tbody><tfoot><tr><td>Suma</td>' +
+      '<td class="num">' + num(total(r.filas, 'totalConversations')) + '</td><td class="num">' + num(total(r.filas, 'customersHelped')) + '</td><td class="num">' + num(total(r.filas, 'totalReplies')) + '</td><td></td><td class="num">' + num(total(r.filas, 'resolved')) +
+      '</td><td></td><td class="num">' + num(total(r.filas, 'closed')) + '</td><td colspan="4"></td></tr></tfoot></table></div></div>' +
+      '<p class="fuente" style="margin-top:10px">Fuente: Reports de Help Scout, del ' + esc(r.rango.desde) + ' 00:00 al ' + esc(r.rango.hasta) + ' 23:59 (' + esc(tz()) + '). Una conversación atendida por dos agentes cuenta para cada una, por eso la suma puede ser mayor que el total del equipo.</p></div>';
   }
 
-  var NOMBRE_TIPO = { ASIGNADO: 'Asignado', RESPUESTA: 'Respuesta', PRIMERA_RESPUESTA: 'Primera respuesta', NUEVA_CONSULTA: 'Nueva consulta', REASIGNADO: 'Re-asignado', CERRADO: 'Cerrado' };
+  var DIAS_SEMANA = ['', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'domingo'];
   function hojas() {
-    var r = reporte, c = r.config, v = function (x) { return x == null ? '' : x; };
-    var agentes = [['Agente', 'Días con actividad', 'Sin atender al iniciar (suma diaria)', 'Asignados', 'Nuevas consultas', 'Re-asignados', 'Total gestionados (suma diaria)', 'Cerrados', '% Resolución',
-      'Días en verde', 'Días en amarillo', 'Días en rojo', 'Respuestas enviadas', 'Casos respondidos', 'Respuestas por día', 'Respuestas con tiempo medido', 'T. respuesta promedio (min)',
-      'T. respuesta mediana (min)', 'T. respuesta P90 (min)', 'T. respuesta máximo (min)', '% respuestas dentro de la meta', 'Primeras respuestas medidas', '1ª respuesta promedio (min)',
-      '1ª respuesta mediana (min)', '1ª respuesta P90 (min)', 'Cierres medidos', 'Resolución promedio (h)', 'Resolución mediana (h)', 'Resolución P90 (h)', '% resueltos dentro de la meta']]
-      .concat(r.porAgente.map(function (a) {
-        return [a.agente, a.dias, a.sinAtender, a.asignados, a.nuevaConsulta, a.reasignados, a.total, a.cerrados, v(a.pctResolucion), a.verde, a.amarillo, a.rojo, a.respuestas, a.casosRespondidos,
-          v(a.respuestasPorDia), a.respuestasMedidas, v(a.respuestaPromMin), v(a.respuestaMedianaMin), v(a.respuestaP90Min), v(a.respuestaMaxMin), v(a.respuestaEnMeta), a.primerasMedidas,
-          v(a.primeraPromMin), v(a.primeraMedianaMin), v(a.primeraP90Min), a.resolucionesMedidas, v(a.resolucionPromH), v(a.resolucionMedianaH), v(a.resolucionP90H), v(a.resolucionEnMeta)];
+    var x = exportacion, r = x.resumen, v = function (n) { return n == null ? '' : n; };
+    var min = function (s) { return s == null ? '' : Math.round(s / 6) / 10; }, hrs = function (s) { return s == null ? '' : Math.round(s / 360) / 10; };
+    var resumen = [['Agente', 'Días del periodo', 'Conversaciones', 'Conversaciones creadas', 'Clientes ayudados', 'Respuestas enviadas', 'Respuestas por día', 'Conversaciones por día',
+      'Resueltos', 'Resueltos en la 1ª respuesta', '% resueltos en la 1ª respuesta', 'Respuestas para resolver', 'Cerrados', 'T. respuesta (min)', 'T. resolución (h)', 'T. gestión (min)',
+      'Felicidad', 'Día más ocupado', 'T. respuesta (s)', 'T. resolución (s)', 'T. gestión (s)']]
+      .concat(r.filas.map(function (f) {
+        return [f.nombre, v(f.totalDays), v(f.totalConversations), v(f.conversationsCreated), v(f.customersHelped), v(f.totalReplies), v(f.repliesPerDay), v(f.conversationsPerDay), v(f.resolved),
+          v(f.resolvedOnFirstReply), v(fraccion(f.percentResolvedOnFirstReply)), v(f.repliesToResolve), v(f.closed), min(f.responseTime), hrs(f.resolutionTime), min(f.handleTime), v(f.happinessScore),
+          DIAS_SEMANA[f.busiestDay] || '', v(f.responseTime), v(f.resolutionTime), v(f.handleTime)];
       }));
-    var dias = [['Día de jornada', 'Agente', 'Sin atender al iniciar', 'Asignados', 'Nuevas consultas', 'Re-asignados', 'Total gestionados', 'Cerrados', 'Pendientes', '% Resolución', 'Semáforo',
-      'Respuestas enviadas', 'Casos respondidos', 'T. respuesta promedio (min)', 'T. respuesta mediana (min)', '% respuestas dentro de la meta', '1ª respuesta promedio (min)', 'Resolución promedio (h)']]
-      .concat(r.porDia.map(function (d) {
-        return [d.dia, d.agente, d.sinAtender, d.asignados, d.nuevaConsulta, d.reasignados, d.total, d.cerrados, d.pendientes, v(d.pctResolucion), v(d.semaforo), d.respuestas, d.casosRespondidos,
-          v(d.respuestaPromMin), v(d.respuestaMedianaMin), v(d.respuestaEnMeta), v(d.primeraPromMin), v(d.resolucionPromH)];
-      }));
-    var detalle = [['Día de jornada', 'Fecha y hora', 'Movimiento', 'Agente', '# Caso', 'Asunto', 'Minutos laborales', 'Enlace']]
-      .concat(r.detalle.map(function (e) { return [e.dia, e.fecha, NOMBRE_TIPO[e.tipo] || e.tipo, e.agente, e.numero, e.asunto, v(e.minutos), e.enlace]; }));
+    var etiqueta = { day: 'Día', week: 'Semana (inicio)', month: 'Mes (inicio)' }[(x.series && x.series.vista) || 'day'];
+    var series = [[etiqueta, 'Agente', 'Respuestas enviadas', 'Resueltos', 'Clientes ayudados']]
+      .concat(((x.series && x.series.filas) || []).map(function (f) { return [f.fecha, f.nombre, f.respuestas, f.resueltos, f.clientes]; }));
+    var casos = [['Agente', '# Caso', 'Cliente', 'Estado', 'Respuestas enviadas', '1ª respuesta (min)', 'T. respuesta (min)', 'T. resolución (h)', 'T. gestión (min)', 'Enlace']]
+      .concat((x.casos || []).map(function (c) { return [c.agente, c.numero, c.cliente, c.estado, v(c.respuestas), min(c.primeraRespuesta), min(c.respuesta), hrs(c.resolucion), min(c.gestion), c.url]; }));
+    var nombres = E.agentes.filter(function (a) { return x.filtros.agentes.indexOf(a.id) >= 0; }).map(function (a) { return a.nombre; });
     var notas = [['Métricas de soporte — Help Scout'], [],
-      ['Periodo', r.filtros.desde + ' a ' + r.filtros.hasta], ['Agentes', r.filtros.agentes.join(', ')],
-      ['Movimientos en el detalle', r.filtros.tipos ? r.filtros.tipos.map(function (t) { return NOMBRE_TIPO[t] || t; }).join(', ') : 'Todos'],
-      ['Generado', r.generado + ' (' + c.zonaHoraria + ')'], ['Última sincronización con Help Scout', r.ultimaSincronizacion || 'nunca'],
-      ['Historial disponible desde', r.fechaInicio], [],
-      ['Definiciones'],
-      ['Día de jornada', 'Lo que pasa después de las ' + c.horario.fin + ':00 o en un día no laboral cuenta para el siguiente día laboral.'],
-      ['Asignados', 'Casos que quedaron asignados al agente ese día. Cada caso cuenta una vez por día.'],
-      ['Nuevas consultas', 'El cliente volvió a escribir en un caso que el agente tenía desde un día anterior y ya había atendido.'],
-      ['Re-asignados', 'El caso pasó del agente a otra persona, equipo o buzón.'],
-      ['Sin atender al iniciar', 'Foto de las ' + c.horario.inicio + ':00: casos que el agente traía sin atender. La suma de varios días cuenta el mismo caso cada día que siguió abierto.'],
-      ['Total gestionados', 'Sin atender al iniciar + Asignados + Nuevas consultas − Re-asignados (igual que el tracker).'],
-      ['% Resolución', 'Cerrados ÷ Total gestionados. Semáforo: verde ≥ ' + c.semaforo.verde * 100 + '%, amarillo ≥ ' + c.semaforo.amarillo * 100 + '%, rojo por debajo.'],
-      ['Respuestas enviadas', 'Cada mensaje que el agente envió al cliente (no cuentan notas internas).'],
-      ['T. respuesta', 'Minutos desde el primer mensaje del cliente que estaba sin contestar hasta la respuesta. Solo se mide cuando había un mensaje del cliente esperando. Meta: ' + c.metaRespuestaMin + ' min.'],
-      ['1ª respuesta', 'Minutos desde que el caso quedó asignado al agente hasta su primera respuesta.'],
-      ['Resolución', 'Horas desde la asignación (o reapertura) hasta el cierre. Meta: ' + c.metaResolucionHoras + ' h. Los cierres automáticos de Help Scout no cuentan.'],
-      ['Tiempos', 'Todos los tiempos cuentan solo el horario laboral (' + c.horario.inicio + ':00–' + c.horario.fin + ':00, días laborales).'],
-      ['P90', 'El 90% de los casos tardó ese tiempo o menos.'],
-      ['Respuestas de días pasados', 'Las respuestas individuales se registran desde que se instaló esta versión. Para días anteriores usa en la hoja: Help Scout → Completar historial de respuestas.']];
-    return { agentes: agentes, dias: dias, detalle: detalle, notas: notas };
+      ['Periodo', r.rango.desde + ' 00:00 a ' + r.rango.hasta + ' 23:59 (' + tz() + ')'], ['Agentes', nombres.join(', ')],
+      ['Tiempos en horario de oficina', x.filtros.oficina ? 'Sí (si está activado en Help Scout)' : 'No: tiempo corrido'],
+      ['Generado', new Date(x.generado).toLocaleString('es', { timeZone: tz() }) + ' (' + tz() + ')'], [],
+      ['Fuente', 'Todas las cifras son las de los reportes oficiales de Help Scout (sección Reports → Team → usuario), sin recálculo.'],
+      ['Conversaciones', 'Conversaciones en las que el agente participó en el periodo (totalConversations).'],
+      ['Clientes ayudados', 'Clientes distintos a los que el agente respondió (customersHelped).'],
+      ['Respuestas enviadas', 'Mensajes enviados a clientes (totalReplies). No cuentan las notas internas.'],
+      ['Resueltos', 'Conversaciones resueltas por el agente (resolved). Help Scout cuenta una conversación como resuelta cuando se cierra y no se reabre.'],
+      ['Cerrados', 'Veces que el agente cerró una conversación (closed).'],
+      ['T. respuesta', 'Tiempo promedio de respuesta (responseTime). Help Scout lo entrega en segundos; aquí se muestra en minutos y también en segundos.'],
+      ['T. resolución', 'Tiempo promedio hasta resolver (resolutionTime), en horas y en segundos.'],
+      ['T. gestión', 'Tiempo promedio de gestión de cada respuesta (handleTime). Help Scout no documenta la unidad; se asume segundos.'],
+      ['Felicidad', 'Happiness score de Help Scout: % de calificaciones "Great" menos % de "Not Good".'],
+      ['Sumas', 'Una conversación atendida por dos agentes cuenta para cada una: la suma de agentes puede superar el total del equipo.'],
+      ['Evolución', 'Help Scout entrega la serie por día hasta 60 días, por semana hasta 1 año y por mes para rangos mayores.']];
+    return { resumen: resumen, series: series, casos: casos, notas: notas };
   }
-  function nombreArchivo(ext, sufijo) { return 'metricas-soporte_' + reporte.filtros.desde + '_a_' + reporte.filtros.hasta + (sufijo ? '_' + sufijo : '') + '.' + ext; }
+  function nombreArchivo(ext, sufijo) { var f = exportacion.filtros; return 'metricas-soporte_' + f.desde + '_a_' + f.hasta + (sufijo ? '_' + sufijo : '') + '.' + ext; }
   function bajar(blob, nombre) {
     var a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = nombre; document.body.appendChild(a); a.click();
@@ -692,30 +969,27 @@ dialog::backdrop { background: rgba(0, 0, 0, .66); }
       var h = hojas(), libro = XLSX.utils.book_new();
       var agregar = function (nombre, filas, anchos, columnasPct) {
         var hoja = XLSX.utils.aoa_to_sheet(filas);
-        hoja['!cols'] = filas[0].map(function (t, i) { return { wch: (anchos && anchos[i]) || Math.max(12, Math.min(34, String(t).length + 2)) }; });
+        hoja['!cols'] = filas[0].map(function (t, i) { return { wch: (anchos && anchos[i]) || Math.max(12, Math.min(32, String(t).length + 2)) }; });
         (columnasPct || []).forEach(function (col) {
-          for (var f = 1; f < filas.length; f++) {
-            var celda = hoja[XLSX.utils.encode_cell({ r: f, c: col })];
-            if (celda && typeof celda.v === 'number') celda.z = '0%';
-          }
+          for (var f = 1; f < filas.length; f++) { var celda = hoja[XLSX.utils.encode_cell({ r: f, c: col })]; if (celda && typeof celda.v === 'number') celda.z = '0%'; }
         });
         if (filas.length > 1) hoja['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: filas.length - 1, c: filas[0].length - 1 } }) };
         XLSX.utils.book_append_sheet(libro, hoja, nombre);
       };
-      agregar('Resumen por agente', h.agentes, { 0: 24 }, [8, 20, 29]);
-      agregar('Por día', h.dias, { 0: 14, 1: 24 }, [9, 15]);
-      agregar('Detalle', h.detalle, { 0: 14, 1: 20, 2: 18, 3: 24, 5: 48, 7: 58 });
+      agregar('Resumen por agente', h.resumen, { 0: 24 }, [10]);
+      if (exportacion.series) agregar('Evolución', h.series, { 0: 16, 1: 24 });
+      if (exportacion.casos) agregar('Conversaciones', h.casos, { 0: 24, 2: 28, 9: 58 });
       var notas = XLSX.utils.aoa_to_sheet(h.notas);
-      notas['!cols'] = [{ wch: 36 }, { wch: 120 }];
+      notas['!cols'] = [{ wch: 32 }, { wch: 120 }];
       XLSX.utils.book_append_sheet(libro, notas, 'Notas');
-      var datosBin = XLSX.write(libro, { bookType: 'xlsx', type: 'array' });
-      bajar(new Blob([datosBin], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), nombreArchivo('xlsx'));
+      bajar(new Blob([XLSX.write(libro, { bookType: 'xlsx', type: 'array' })], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), nombreArchivo('xlsx'));
       $('expEstado').textContent = 'Excel descargado.';
     });
   }
   function descargarCsv() {
-    var cual = $('expCsvHoja').value, filas = hojas()[cual];
-    var texto = filas.map(function (f) {
+    var cual = $('expCsvHoja').value;
+    if ((cual === 'series' && !exportacion.series) || (cual === 'casos' && !exportacion.casos)) { $('expEstado').textContent = 'Marca esa opción en "Contenido del archivo" para incluirla.'; return; }
+    var texto = hojas()[cual].map(function (f) {
       return f.map(function (c) { var s = String(c == null ? '' : c); return /[",\n;]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }).join(',');
     }).join('\r\n');
     bajar(new Blob(['﻿' + texto], { type: 'text/csv;charset=utf-8' }), nombreArchivo('csv', cual));
@@ -727,71 +1001,30 @@ dialog::backdrop { background: rgba(0, 0, 0, .66); }
     pausado = !pausado;
     this.setAttribute('aria-pressed', pausado ? 'true' : 'false');
     this.textContent = pausado ? 'Reanudar' : 'Pausar';
-    if (pausado) clearTimeout(temporizador); else pedir();
+    if (pausado) clearTimeout(temporizador); else ciclo();
     tic();
   });
   $('btnExportar').addEventListener('click', abrirExportar);
   $('expPeriodo').addEventListener('change', aplicarPeriodo);
   ['expDesde', 'expHasta'].forEach(function (id) { $(id).addEventListener('change', function () { $('expPeriodo').value = 'personal'; }); });
-  $('expVer').addEventListener('click', function () { pedirReporte(); });
-  $('expExcel').addEventListener('click', function () { pedirReporte(descargarExcel); });
-  $('expCsv').addEventListener('click', function () { pedirReporte(descargarCsv); });
+  $('expVer').addEventListener('click', function () { pedirExportacion(false); });
+  $('expExcel').addEventListener('click', function () { pedirExportacion(true, descargarExcel); });
+  $('expCsv').addEventListener('click', function () { pedirExportacion(true, descargarCsv); });
   todos('[data-cerrar]').forEach(function (b) { b.addEventListener('click', function () { b.closest('dialog').close(); }); });
   todos('dialog').forEach(function (d) { d.addEventListener('click', function (ev) { if (ev.target === d) d.close(); }); });
   document.addEventListener('visibilitychange', function () {
-    if (!document.hidden && !pausado && Date.now() - ultimaOk > intervalo() * 1000) pedir();
+    if (!document.hidden && !pausado && E.cfg && Date.now() - ultimaOk > intervalo() * 1000) ciclo();
   });
 
-  // ---------- Demostración (solo al abrir el archivo fuera de Apps Script) ----------
-  var DEMO = (function () {
-    var nombres = ['Jaideth Andocilla', 'Maryelin Rios', 'Edna Escudero', 'Andrés Rodríguez'];
-    var asuntos = ['Cobro duplicado en mi tarjeta', 'Solicitud de reembolso', 'No puedo iniciar sesión', 'Necesito la factura de mi compra', 'Cambio de fecha de mi entrada', 'El código QR no funciona', 'No me llegó el acceso', 'Transferir mi entrada'];
-    var clientes = ['José Martínez', 'Ana Lucía Torres', 'Diego Herrera', 'Luis Ramírez', 'Carlos Pérez', 'Valentina Castro', 'Laura Gómez', 'Camila Ortiz'];
-    function hace(min) { return new Date(Date.now() - min * 60000).toISOString(); }
-    function t(i, min, ag, estado) {
-      return { id: 4500 + i, numero: 4500 + i, asunto: asuntos[i % 8], cliente: clientes[i % 8], estado: estado || 'active', esperaDesde: hace(min), agenteId: ag ? ag : null, agente: ag ? nombres[ag - 1] : '', buzon: 'Soporte', url: '#' };
-    }
-    function hoy(r, c, a, re, pr, p1, ult) { return { respuestas: r, casosRespondidos: Math.round(r * .7), asignados: a, cerrados: c, reasignados: re, nuevasConsultas: 2, tiemposMedidos: r - 4, promedioRespuestaMin: pr, medianaRespuestaMin: pr - 2, promedioPrimeraMin: p1, ultimaRespuesta: hace(ult) }; }
-    function ag(id, esp, seg, h) { return { id: id, nombre: nombres[id - 1], vinculado: true, esperando: esp, seguimiento: seg, abiertos: esp.length + seg, activos: esp.length, pendientes: seg, hoy: h }; }
-    return {
-      datosPanelEnVivo: function () {
-        return {
-          ok: true, ahora: new Date().toISOString(), hoy: new Date().toISOString().slice(0, 10), tz: 'America/New_York', enHorario: true, horario: { inicio: 9, fin: 17 },
-          segundos: 5, segundosFueraDeHorario: 60, metaRespuestaMin: 60, alertaSinResponderMin: [10, 30], ultimaRecargaCompleta: hace(3), sinVincular: [],
-          verificacion: { hora: hace(3), ok: true, casosAbiertos: 15, casosDelDia: 96, avisos: [] }, agentes: nombres, fechaInicio: '2026-10-01', metaResolucionHoras: 8,
-          panel: {
-            agentes: [ag(1, [t(18, 41, 1), t(12, 12, 1)], 2, hoy(38, 17, 21, 2, 12.4, 9, 2)), ag(2, [t(1, 96, 2), t(9, 67, 2, 'pending'), t(20, 38, 2)], 1, hoy(19, 8, 18, 1, 43, 31, 34)),
-              ag(3, [t(32, 18, 3)], 3, hoy(44, 22, 23, 3, 8.2, 6, 1)), ag(4, [t(3, 54, 4), t(24, 27, 4)], 1, hoy(27, 11, 16, 4, 22, 15, 13))],
-            sinAsignar: [t(40, 7, 0), t(42, 1, 0)],
-            equipo: { esperando: 8, seguimiento: 7, abiertos: 15, respuestas: 128, casosRespondidos: 90, asignados: 78, cerrados: 58, reasignados: 10, nuevasConsultas: 8, tiemposMedidos: 112, promedioRespuestaMin: 18.4, medianaRespuestaMin: 12, promedioPrimeraMin: 14 },
-            feed: [['RESPUESTA', 3, 21, 0.4, 6], ['CLIENTE', 0, 42, 1, null], ['RESPUESTA', 1, 31, 2, 14], ['CERRADO', 3, 17, 5, 95], ['ASIGNADO', 4, 30, 9, null], ['REASIGNADO', 4, 11, 13, null], ['NUEVA_CONSULTA', 2, 70, 20, null], ['CLIENTE', 2, 20, 38, null]]
-              .map(function (f) { return { fecha: hace(f[3]), tipo: f[0], agente: f[1] ? nombres[f[1] - 1] : '', numero: 4500 + f[2], asunto: asuntos[f[2] % 8], minutos: f[4], url: '#' }; }),
-          },
-        };
-      },
-      detalleAgentePanel: function (id) {
-        return { ok: true, agente: nombres[id - 1], abiertos: [{ numero: 4518, asunto: asuntos[2], cliente: clientes[2], estado: 'active', esperaDesde: hace(41), url: '#' }, { numero: 4531, asunto: asuntos[5], cliente: clientes[5], estado: 'pending', esperaDesde: null, url: '#' }],
-          movimientos: [['RESPUESTA', 2, 14], ['CERRADO', 9, 95], ['RESPUESTA', 12, null], ['ASIGNADO', 30, null]].map(function (m, i) { return { fecha: hace(m[1]), tipo: m[0], numero: 4520 + i, asunto: asuntos[i], minutos: m[2], url: '#' }; }) };
-      },
-      reporteMetricas: function (f) {
-        var filas = f.agentes.map(function (n, i) {
-          return { agente: n, dias: 5, sinAtender: 9 + i, asignados: 80 + i * 7, nuevaConsulta: 12, reasignados: 6, total: 95 + i * 7, cerrados: 82 + i * 5, pctResolucion: 0.86, verde: 3, amarillo: 2, rojo: 0, respuestas: 160 + i * 11, casosRespondidos: 90,
-            respuestasPorDia: 32, respuestasMedidas: 140, respuestaPromMin: 18.2 + i, respuestaMedianaMin: 12, respuestaP90Min: 55, respuestaMaxMin: 190, respuestaEnMeta: 0.91, primerasMedidas: 80, primeraPromMin: 14, primeraMedianaMin: 9, primeraP90Min: 40,
-            resolucionesMedidas: 82, resolucionPromH: 3.4, resolucionMedianaH: 2.1, resolucionP90H: 9, resolucionEnMeta: 0.88 };
-        });
-        var eq = JSON.parse(JSON.stringify(filas[0])); eq.agente = 'EQUIPO';
-        return { ok: true, filtros: { desde: f.desde, hasta: f.hasta, agentes: f.agentes, tipos: f.tipos }, porAgente: filas.concat([eq]),
-          porDia: f.agentes.map(function (n) { return { dia: f.hasta, agente: n, sinAtender: 2, asignados: 16, nuevaConsulta: 2, reasignados: 1, total: 19, cerrados: 17, pendientes: 2, pctResolucion: 0.89, semaforo: 'AMARILLO', respuestas: 31, casosRespondidos: 20, respuestaPromMin: 17, respuestaMedianaMin: 11, respuestaEnMeta: 0.93, primeraPromMin: 12, resolucionPromH: 3.1 }; }),
-          detalle: [{ dia: f.hasta, fecha: f.hasta + ' 10:02:11', tipo: 'RESPUESTA', agente: f.agentes[0], numero: 4521, asunto: asuntos[0], minutos: 12, enlace: 'https://secure.helpscout.net/conversation/1/4521' }],
-          eventosTotales: 1, generado: f.hasta + ' 16:00', ultimaSincronizacion: f.hasta + ' 15:45', sincronizacionIncompleta: false, fechaInicio: '2026-10-01',
-          config: { horario: { inicio: 9, fin: 17 }, metaRespuestaMin: 60, metaResolucionHoras: 8, semaforo: { verde: 0.9, amarillo: 0.6 }, zonaHoraria: 'America/New_York' } };
-      },
-    };
-  })();
-
   setInterval(tic, 1000);
-  tic();
-  pedir();
+  if (DEMO) {
+    var s = document.createElement('script');
+    s.src = 'demo.js';
+    s.onload = arrancar;
+    document.head.appendChild(s);
+  } else {
+    arrancar();
+  }
 })();
 </script>
 </body>

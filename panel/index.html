@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<base target="_top">
+<title>Soporte · Control en vivo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="estilos.css">
+</head>
+<body>
+<div id="app">
+<header class="cab">
+  <div class="cab-in">
+    <div class="marca"><b>Soporte</b><span>Control en vivo · Help Scout</span></div>
+    <span id="conexion" class="estado-con tenue"><i></i><span>Conectando</span></span>
+    <div class="hora"><b id="reloj">--:--:--</b><span id="actualizado">Cargando</span></div>
+    <button type="button" class="btn" id="btnPausa" aria-pressed="false">Pausar</button>
+    <button type="button" class="btn principal" id="btnExportar">Exportar métricas</button>
+  </div>
+  <div class="avance"><i id="avance"></i></div>
+</header>
+
+<main class="pagina">
+  <div id="avisos"></div>
+  <div id="contenido"><div class="cargando" id="progreso">Leyendo Help Scout.</div></div>
+</main>
+</div>
+
+<dialog id="dlgExportar" aria-labelledby="tituloExportar">
+  <div class="dlg-cab">
+    <div><h3 id="tituloExportar">Exportar métricas</h3><p>Cifras de los reportes oficiales de Help Scout (las mismas de su sección Reports).</p></div>
+    <button type="button" class="btn chico" data-cerrar>Cerrar</button>
+  </div>
+  <div class="dlg-cuerpo">
+    <div class="filtros">
+      <div class="campo">
+        <label for="expPeriodo">Periodo</label>
+        <select id="expPeriodo">
+          <option value="hoy">Hoy</option>
+          <option value="ayer">Ayer</option>
+          <option value="semana" selected>Esta semana</option>
+          <option value="semanaPasada">Semana pasada</option>
+          <option value="mes">Este mes</option>
+          <option value="mesPasado">Mes pasado</option>
+          <option value="90">Últimos 90 días</option>
+          <option value="personal">Personalizado</option>
+        </select>
+        <div class="fechas">
+          <div><span>Desde</span><input type="date" id="expDesde" aria-label="Desde"></div>
+          <div><span>Hasta</span><input type="date" id="expHasta" aria-label="Hasta"></div>
+        </div>
+      </div>
+      <div class="campo">
+        <span class="rot">Agentes</span>
+        <div class="checks" id="expAgentes"></div>
+      </div>
+      <div class="campo">
+        <span class="rot">Contenido del archivo</span>
+        <div class="checks">
+          <label><input type="checkbox" checked disabled> Resumen por agente</label>
+          <label><input type="checkbox" id="expSeries" checked> Evolución por día, semana o mes</label>
+          <label><input type="checkbox" id="expCasos"> Lista de conversaciones con sus tiempos (más lento)</label>
+          <label><input type="checkbox" id="expOficina"> Tiempos solo en horario de oficina de Help Scout</label>
+        </div>
+      </div>
+    </div>
+    <div class="acciones">
+      <button type="button" class="btn" id="expVer">Ver vista previa</button>
+      <button type="button" class="btn principal" id="expExcel">Descargar Excel</button>
+      <select id="expCsvHoja" aria-label="Hoja para CSV" style="height:36px;padding:0 10px;border-radius:6px;border:1px solid var(--line-2);background:var(--bg);color-scheme:dark">
+        <option value="resumen">CSV · Resumen por agente</option>
+        <option value="series">CSV · Evolución</option>
+        <option value="casos">CSV · Conversaciones</option>
+      </select>
+      <button type="button" class="btn" id="expCsv">Descargar CSV</button>
+      <span class="nota" id="expEstado" role="status"></span>
+    </div>
+    <div class="previa" id="expPrevia"></div>
+  </div>
+</dialog>
+
+<dialog id="dlgDetalle" aria-labelledby="tituloDetalle">
+  <div class="dlg-cab">
+    <div><h3 id="tituloDetalle">Detalle</h3><p id="subDetalle"></p></div>
+    <button type="button" class="btn chico" data-cerrar>Cerrar</button>
+  </div>
+  <div class="dlg-cuerpo" id="cuerpoDetalle"></div>
+</dialog>
+
+<script src="logica.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -3,13 +3,11 @@
  */
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('Help Scout')
+    .addItem('Panel en vivo', 'menuPanelEnVivo')
+    .addSeparator()
     .addItem('1. Configurar credenciales', 'menuConfigurarCredenciales')
     .addItem('2. Ver usuarios y buzones de Help Scout', 'menuListarUsuarios')
     .addItem('3. Activar sincronización automática', 'menuActivar')
-    .addSeparator()
-    .addItem('Panel en vivo', 'menuPanelEnVivo')
-    .addItem('Verificar panel contra Help Scout', 'menuVerificarPanel')
-    .addItem('Completar historial de respuestas (para exportar)', 'menuCompletarHistorial')
     .addSeparator()
     .addItem('Sincronizar ahora', 'menuSincronizar')
     .addItem('Tomar foto de inicio de jornada ahora', 'menuFoto')

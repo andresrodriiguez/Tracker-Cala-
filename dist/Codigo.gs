@@ -1,4 +1,4 @@
-// Tracker Gestión Diaria SOP ⇄ Help Scout — archivo generado con `npm run build`.
+// Panel en vivo de soporte + tracker (Help Scout) — archivo generado con `npm run build`.
 // Pégalo completo en Extensiones → Apps Script (reemplaza el contenido de Código.gs).
 
 // ===== Config.gs =====
@@ -78,23 +78,6 @@ const CONFIG = {
     COLUMNAS_AUTOMATICAS: ['sinAtender', 'asignados', 'nuevaConsulta', 'reasignados', 'cerrados', 'pendientes'],
     // false: los ceros se dejan en blanco (como se ve hoy el tracker).
     ESCRIBIR_CEROS: false,
-  },
-
-  // --- Panel en vivo (página web aparte: ver README, "Panel en vivo") ---
-  PANEL: {
-    // Cada cuántos segundos la página consulta Help Scout (en horario laboral y fuera de él).
-    SEGUNDOS_ACTUALIZACION: 5,
-    SEGUNDOS_FUERA_DE_HORARIO: 60,
-    // Cada cuántos minutos se vuelve a leer todo desde cero (por si algo se escapó).
-    MINUTOS_RECARGA_COMPLETA: 5,
-    // Meta para responder al cliente: el reloj de cada ticket pasa a amarillo a la mitad y a rojo al llegar.
-    META_RESPUESTA_MIN: 60,
-    // Estado de cada agente: amarillo / rojo si tiene clientes esperando y no responde hace estos minutos.
-    ALERTA_SIN_RESPONDER_MIN: [10, 30],
-    // Mostrar la cola de casos activos sin asignar (de los buzones de MAILBOXES_EQUIPO, o de todos si está vacío).
-    MOSTRAR_SIN_ASIGNAR: true,
-    MAX_PAGINAS_SIN_ASIGNAR: 4, // 25 casos por página
-    MAX_PAGINAS_DIA: 30,
   },
 
   // Hojas que crea el script.
@@ -218,18 +201,6 @@ function mesDesdeNombreHoja(nombre) {
   return mes < 0 ? null : { anio: Number(m[2]), mes: mes + 1 };
 }
 
-/**
- * Momento (hora local 'yyyy-MM-dd HH:mm:ss') desde el que los movimientos cuentan para el día de
- * jornada `dia`: el cierre de la jornada laboral anterior.
- * Ej. (9–17, lun–sáb): miércoles → martes 17:00:00; lunes → sábado 17:00:00.
- */
-function inicioVentanaJornada(dia, horario) {
-  const DIA = 86400000;
-  let d = new Date(dia + 'T00:00:00Z').getTime() - DIA;
-  for (let i = 0; i < 7 && horario.dias.indexOf(new Date(d).getUTCDay()) < 0; i++) d -= DIA;
-  return new Date(d).toISOString().slice(0, 10) + ' ' + String(horario.fin).padStart(2, '0') + ':00:00';
-}
-
 // ===== Eventos.gs =====
 /**
  * Convierte el historial (hilos) de una conversación de Help Scout en eventos por agente.
@@ -242,8 +213,6 @@ function inicioVentanaJornada(dia, horario) {
  *   REASIGNADO        el caso salió del agente hacia otro usuario/equipo/buzón (CCH, COACH, ...)
  *   CERRADO           el caso pasó a "closed" estando a cargo del agente; minutos = tiempo de resolución
  *   PRIMERA_RESPUESTA primera respuesta del agente tras la asignación; minutos = tiempo de 1ª respuesta
- *   RESPUESTA         (solo con ctx.incluirRespuestas) cada respuesta de un agente del equipo; minutos = tiempo
- *                     desde el primer mensaje del cliente que estaba sin contestar (null si no había ninguno)
  *
  * @param {Object} conv  Conversación de la API v2 de Help Scout con _embedded.threads.
  * @param {Object} ctx
@@ -255,7 +224,6 @@ function inicioVentanaJornada(dia, horario) {
  *   minutos(fin, inicio) → (opcional) minutos entre dos Date; por defecto minutos corridos
  *   fechaInicio      → (opcional) 'yyyy-MM-dd'; cerrar un caso que entró a la carga antes de esta
  *                      fecha cuenta como asignado + cerrado ese día
- *   incluirRespuestas → (opcional) true para emitir también los eventos RESPUESTA
  * @return {Object[]} eventos
  */
 /**
@@ -312,7 +280,6 @@ function derivarEventos(conv, ctx) {
   let inicioCiclo = null;         // desde cuándo se mide la resolución (asignación o reapertura)
   let primeraRespuestaPendiente = false;
   let hayReasignacion = false;
-  let clienteDesde = null;        // primer mensaje del cliente que sigue sin respuesta
 
   const aplicarAsignacion = (nuevoId, fecha, claveHilo) => {
     if (nuevoId === asignado) return;
@@ -361,7 +328,6 @@ function derivarEventos(conv, ctx) {
         diaEntrada = dia;
       }
       esperandoAgente = true;
-      if (!clienteDesde) clienteDesde = fecha;
     }
 
     // 2) Cambios de asignación.
@@ -380,10 +346,6 @@ function derivarEventos(conv, ctx) {
     if (esRespuestaAgente) {
       esperandoAgente = false;
       const agente = ctx.agentePorId(Number(autor.id));
-      if (ctx.incluirRespuestas && agente) {
-        emitir('RESPUESTA', 'Q-' + h.id, agente, fecha, clienteDesde ? minutosEntre(fecha, clienteDesde) : null);
-      }
-      clienteDesde = null;
       if (agente && primeraRespuestaPendiente && asignado === agente.id) {
         emitir('PRIMERA_RESPUESTA', 'P-' + h.id, agente, fecha, minutosEntre(fecha, inicioAsignacion));
         primeraRespuestaPendiente = false;
@@ -409,8 +371,6 @@ function derivarEventos(conv, ctx) {
           minutosEntre(fecha, inicioCiclo || new Date(conv.createdAt)));
       }
     }
-    // Al cerrarse el caso, el cliente deja de estar esperando.
-    if (nuevoEstado === 'closed' && estadoPrevio !== 'closed' && !esCliente) clienteDesde = null;
     estado = nuevoEstado;
   });
 
@@ -495,372 +455,6 @@ function estadisticasTiempo(minutos, metaHoras) {
   };
 }
 
-// ===== EnVivo.gs =====
-/**
- * Panel en vivo — cálculo puro (sin servicios de Apps Script), se prueba con Node en tests/.
- *
- * Cada conversación de Help Scout se resume en un objeto pequeño ("compacto") con lo que el panel
- * necesita: si el cliente está esperando y desde cuándo, a quién está asignada y lo que pasó en el
- * día de jornada actual. Todo sale del HISTORIAL de mensajes (hilos) de la conversación, la misma
- * fuente que usa el tracker; no se usan campos de resumen de Help Scout sin documentar.
- */
-
-const TIPOS_MENSAJE_ = ['message', 'chat', 'phone'];
-
-function hilosPublicados_(conv) {
-  return ((conv._embedded && conv._embedded.threads) || [])
-    .filter(h => !h.state || h.state === 'published')
-    .slice()
-    .sort((a, b) => (new Date(a.createdAt) - new Date(b.createdAt)) || (a.id - b.id));
-}
-
-/**
- * ¿El cliente está esperando respuesta? Lo está si el caso sigue abierto (active o pending) y su
- * mensaje es el último: ninguna persona del equipo de Help Scout le ha contestado después.
- * Las notas internas y los cambios de estado o de asignación no cuentan como respuesta.
- * @return {{esperando: boolean, desde: string|null, mensajes: number}}
- *   desde = fecha ISO del PRIMER mensaje del cliente que sigue sin contestar
- */
-function esperaDeConversacion(conv) {
-  const abierta = (conv.status === 'active' || conv.status === 'pending') && (!conv.state || conv.state === 'published');
-  let desde = null;
-  let estado = null;
-  let mensajes = 0;
-  hilosPublicados_(conv).forEach(h => {
-    const autor = h.createdBy || {};
-    const esCliente = h.type === 'customer' || autor.type === 'customer';
-    const previo = estado;
-    if (h.status && h.status !== 'nochange') estado = h.status;
-    if (esCliente) {
-      mensajes++;
-      if (!desde) desde = new Date(h.createdAt);
-      return;
-    }
-    if (autor.type === 'user' && TIPOS_MENSAJE_.indexOf(h.type) >= 0) desde = null; // le respondieron
-    if (estado === 'closed' && previo !== 'closed') desde = null;                   // se cerró el caso
-  });
-  return { esperando: abierta && !!desde, desde: abierta && desde ? desde.toISOString() : null, mensajes: mensajes };
-}
-
-/**
- * Conversación de la API v2 de Help Scout (con _embedded.threads) → compacto.
- * @param {Object} o  { dia(Date)→'yyyy-MM-dd', hoy, ctxEventos (con incluirRespuestas: true) }
- */
-function resumirConversacion(conv, o) {
-  const cliente = conv.primaryCustomer || {};
-  const nombreCliente = [cliente.first, cliente.last].filter(Boolean).join(' ') || cliente.email || '';
-  const asignado = conv.assignee && Number(conv.assignee.id) > 0 ? Number(conv.assignee.id) : null;
-  const espera = esperaDeConversacion(conv);
-  const borrada = !!conv.state && conv.state !== 'published';
-  const c = {
-    id: conv.id,
-    n: conv.number,
-    s: String(conv.subject || '(sin asunto)').slice(0, 140),
-    c: String(nombreCliente).slice(0, 60),
-    st: borrada ? 'deleted' : conv.status,
-    a: asignado,
-    mb: conv.mailboxId || null,
-    w: espera.desde,
-    ev: [], // actividad del equipo en el día de jornada: [tipo, agenteId, fechaIso, minutos]
-    cm: [], // mensajes del cliente en el día de jornada: [fechaIso]
-  };
-  if (borrada || conv.status === 'spam') return c;
-
-  derivarEventos(conv, o.ctxEventos).forEach(ev => {
-    if (ev.dia === o.hoy) c.ev.push([ev.tipo, ev.agenteId, ev.fecha.toISOString(), ev.minutos]);
-  });
-  hilosPublicados_(conv).forEach(h => {
-    const fecha = new Date(h.createdAt);
-    if ((h.type === 'customer' || (h.createdBy || {}).type === 'customer') && o.dia(fecha) === o.hoy) {
-      c.cm.push(fecha.toISOString());
-    }
-  });
-  return c;
-}
-
-/** ¿Vale la pena guardar este compacto? (abierto y del equipo, sin asignar, o con actividad del equipo hoy) */
-function compactoRelevante(c, esDelEquipo, mostrarSinAsignar) {
-  const abierto = c.st === 'active' || c.st === 'pending';
-  if (abierto && c.a && esDelEquipo(c.a)) return true;
-  if (abierto && !c.a && mostrarSinAsignar) return true;
-  return c.ev.length > 0;
-}
-
-function promedio_(v) {
-  return v.length ? Math.round(v.reduce((s, x) => s + x, 0) / v.length * 10) / 10 : null;
-}
-
-function mediana_(v) {
-  if (!v.length) return null;
-  const o = v.slice().sort((a, b) => a - b);
-  const m = Math.floor(o.length / 2);
-  return Math.round((o.length % 2 ? o[m] : (o[m - 1] + o[m]) / 2) * 10) / 10;
-}
-
-/**
- * Junta los compactos y arma lo que muestra el panel.
- * @param {Object[]} compactos
- * @param {Object} o  { agentes: [{nombre, id}], nombreBuzon(id)?, mostrarSinAsignar, maxFeed }
- */
-function armarPanelEnVivo(compactos, o) {
-  const porId = {};
-  o.agentes.forEach(a => { if (a.id) porId[a.id] = a; });
-  const nombre = id => (porId[id] ? porId[id].nombre : '');
-  const url = c => 'https://secure.helpscout.net/conversation/' + c.id + '/' + c.n;
-  const ticket = c => ({
-    id: c.id, numero: c.n, asunto: c.s, cliente: c.c, estado: c.st, esperaDesde: c.w,
-    agenteId: c.a && porId[c.a] ? c.a : null, agente: nombre(c.a),
-    buzon: o.nombreBuzon ? o.nombreBuzon(c.mb) : '', url: url(c),
-  });
-  const porEspera = (x, y) => String(x.esperaDesde || '9').localeCompare(String(y.esperaDesde || '9'));
-
-  const hoy = {};
-  o.agentes.forEach(a => {
-    if (!a.id) return;
-    hoy[a.id] = {
-      respuestas: 0, casosRespondidos: new Set(), tiempos: [], primeras: [], ultimaRespuesta: null,
-      ASIGNADO: new Set(), CERRADO: new Set(), REASIGNADO: new Set(), NUEVA_CONSULTA: new Set(),
-    };
-  });
-  const feed = [];
-  const abiertos = [];
-  const sinAsignar = [];
-
-  compactos.forEach(c => {
-    const abierto = c.st === 'active' || c.st === 'pending';
-    if (abierto && c.a && porId[c.a]) abiertos.push(ticket(c));
-    if (abierto && !c.a && o.mostrarSinAsignar !== false && c.w) sinAsignar.push(ticket(c));
-
-    c.ev.forEach(e => {
-      const h = hoy[e[1]];
-      if (!h) return;
-      if (e[0] === 'PRIMERA_RESPUESTA') { if (e[3] != null) h.primeras.push(e[3]); return; }
-      if (e[0] === 'RESPUESTA') {
-        h.respuestas++;
-        h.casosRespondidos.add(c.n);
-        if (e[3] != null) h.tiempos.push(e[3]);
-        if (!h.ultimaRespuesta || e[2] > h.ultimaRespuesta) h.ultimaRespuesta = e[2];
-      } else if (h[e[0]]) {
-        h[e[0]].add(c.n);
-      }
-      feed.push({ fecha: e[2], tipo: e[0], agente: nombre(e[1]), numero: c.n, asunto: c.s, minutos: e[3], url: url(c) });
-    });
-    c.cm.forEach(f => {
-      feed.push({ fecha: f, tipo: 'CLIENTE', agente: c.a && porId[c.a] ? nombre(c.a) : '', numero: c.n, asunto: c.s, minutos: null, url: url(c) });
-    });
-  });
-
-  const agentes = o.agentes.map(a => {
-    const suyos = abiertos.filter(t => t.agenteId === a.id);
-    const esperando = suyos.filter(t => t.esperaDesde).sort(porEspera);
-    const h = hoy[a.id];
-    return {
-      nombre: a.nombre,
-      id: a.id,
-      vinculado: !!a.id,
-      esperando: esperando,
-      seguimiento: suyos.length - esperando.length,
-      abiertos: suyos.length,
-      activos: suyos.filter(t => t.estado === 'active').length,
-      pendientes: suyos.filter(t => t.estado === 'pending').length,
-      hoy: h ? {
-        respuestas: h.respuestas,
-        casosRespondidos: h.casosRespondidos.size,
-        asignados: h.ASIGNADO.size,
-        cerrados: h.CERRADO.size,
-        reasignados: h.REASIGNADO.size,
-        nuevasConsultas: h.NUEVA_CONSULTA.size,
-        tiemposMedidos: h.tiempos.length,
-        promedioRespuestaMin: promedio_(h.tiempos),
-        medianaRespuestaMin: mediana_(h.tiempos),
-        promedioPrimeraMin: promedio_(h.primeras),
-        ultimaRespuesta: h.ultimaRespuesta,
-      } : null,
-    };
-  });
-
-  const vinculados = Object.keys(hoy).map(k => hoy[k]);
-  const sumar = f => vinculados.reduce((s, h) => s + f(h), 0);
-  const todos = k => vinculados.reduce((v, h) => v.concat(h[k]), []);
-  return {
-    agentes: agentes,
-    sinAsignar: sinAsignar.sort(porEspera),
-    equipo: {
-      esperando: agentes.reduce((s, a) => s + a.esperando.length, 0),
-      seguimiento: agentes.reduce((s, a) => s + a.seguimiento, 0),
-      abiertos: agentes.reduce((s, a) => s + a.abiertos, 0),
-      respuestas: sumar(h => h.respuestas),
-      casosRespondidos: sumar(h => h.casosRespondidos.size),
-      asignados: sumar(h => h.ASIGNADO.size),
-      cerrados: sumar(h => h.CERRADO.size),
-      reasignados: sumar(h => h.REASIGNADO.size),
-      nuevasConsultas: sumar(h => h.NUEVA_CONSULTA.size),
-      tiemposMedidos: todos('tiempos').length,
-      promedioRespuestaMin: promedio_(todos('tiempos')),
-      medianaRespuestaMin: mediana_(todos('tiempos')),
-      promedioPrimeraMin: promedio_(todos('primeras')),
-    },
-    feed: feed.sort((x, y) => (x.fecha < y.fecha ? 1 : x.fecha > y.fecha ? -1 : 0)).slice(0, o.maxFeed || 40),
-  };
-}
-
-/**
- * Detalle de una agente para auditar sus cifras: cada movimiento del día y sus casos abiertos.
- * Los totales de la tabla del panel salen exactamente de estas listas.
- */
-function detalleAgenteEnVivo(compactos, agente) {
-  const url = c => 'https://secure.helpscout.net/conversation/' + c.id + '/' + c.n;
-  const movimientos = [];
-  const abiertos = [];
-  compactos.forEach(c => {
-    if ((c.st === 'active' || c.st === 'pending') && c.a === agente.id) {
-      abiertos.push({ numero: c.n, asunto: c.s, cliente: c.c, estado: c.st, esperaDesde: c.w, url: url(c) });
-    }
-    c.ev.forEach(e => {
-      if (e[1] !== agente.id) return;
-      movimientos.push({ fecha: e[2], tipo: e[0], numero: c.n, asunto: c.s, minutos: e[3], url: url(c) });
-    });
-  });
-  return {
-    agente: agente.nombre,
-    movimientos: movimientos.sort((x, y) => (x.fecha < y.fecha ? 1 : -1)),
-    abiertos: abiertos.sort((x, y) => String(x.esperaDesde || '9').localeCompare(String(y.esperaDesde || '9'))),
-  };
-}
-
-// ===== Reporte.gs =====
-/**
- * Reporte para exportar — cálculo puro (sin servicios de Apps Script), se prueba con Node en tests/.
- * Usa los mismos eventos de HS_Eventos y las mismas reglas (contarDia) que llenan el tracker,
- * así que las cantidades por día coinciden con las de las hojas mensuales.
- */
-
-/** Estadísticas de una lista de minutos. meta (en minutos) es opcional. */
-function estadisticasMinutos(valores, meta) {
-  const v = valores.filter(m => typeof m === 'number' && !isNaN(m)).sort((a, b) => a - b);
-  if (!v.length) return { n: 0, promedio: null, mediana: null, p90: null, maximo: null, pctEnMeta: null };
-  const r1 = x => Math.round(x * 10) / 10;
-  const mitad = Math.floor(v.length / 2);
-  return {
-    n: v.length,
-    promedio: r1(v.reduce((s, m) => s + m, 0) / v.length),
-    mediana: r1(v.length % 2 ? v[mitad] : (v[mitad - 1] + v[mitad]) / 2),
-    p90: r1(v[Math.max(0, Math.ceil(v.length * 0.9) - 1)]), // el 90% de los casos tardó esto o menos
-    maximo: r1(v[v.length - 1]),
-    pctEnMeta: meta == null ? null : v.filter(m => m <= meta).length / v.length,
-  };
-}
-
-/**
- * @param {Object[]} eventos  filas de HS_Eventos: { dia, fecha, tipo, agente, numero, asunto, minutos, enlace }
- * @param {Object} fotos      'día|agente normalizado' → { total, casos } (hoja HS_InicioJornada)
- * @param {Object} f
- *   desde, hasta          'yyyy-MM-dd' (incluidos)
- *   agentes               nombres de los agentes a incluir
- *   tipos                 (opcional) tipos de evento para la hoja de detalle
- *   metaRespuestaMin, metaResolucionHoras, semaforo
- */
-function calcularReporte(eventos, fotos, f) {
-  const nombres = {};
-  f.agentes.forEach(n => { nombres[normalizarTexto(n)] = n; });
-  const enRango = e => e.dia && e.dia >= f.desde && e.dia <= f.hasta && nombres[normalizarTexto(e.agente)];
-  const propios = eventos.filter(enRango);
-
-  const grupos = {}; // 'día|agente' → eventos
-  propios.forEach(e => {
-    const k = e.dia + '|' + normalizarTexto(e.agente);
-    (grupos[k] = grupos[k] || []).push(e);
-  });
-  // Días con foto de inicio de jornada pero sin movimientos.
-  Object.keys(fotos || {}).forEach(k => {
-    const dia = k.split('|')[0];
-    const ag = k.slice(dia.length + 1);
-    if (dia >= f.desde && dia <= f.hasta && nombres[ag] && !grupos[k] && fotos[k].total > 0) grupos[k] = [];
-  });
-
-  const minutosDe = (evs, tipo) => evs.filter(e => e.tipo === tipo && e.minutos != null).map(e => Number(e.minutos));
-  const acumulado = agente => ({
-    agente: agente, dias: 0, sinAtender: 0, asignados: 0, nuevaConsulta: 0, reasignados: 0, total: 0, cerrados: 0,
-    verde: 0, amarillo: 0, rojo: 0, respuestas: 0, casos: new Set(), tResp: [], tPrimera: [], tResol: [],
-  });
-  const porAgente = {};
-  f.agentes.forEach(n => { porAgente[normalizarTexto(n)] = acumulado(n); });
-  const equipo = acumulado('EQUIPO');
-
-  const porDia = Object.keys(grupos).sort().map(k => {
-    const dia = k.split('|')[0];
-    const ag = k.slice(dia.length + 1);
-    const evs = grupos[k];
-    const m = contarDia(evs, fotos && fotos[k]);
-    const respuestas = evs.filter(e => e.tipo === 'RESPUESTA');
-    const casos = new Set(respuestas.map(e => String(e.numero)));
-    const tResp = minutosDe(evs, 'RESPUESTA');
-    const tPrimera = minutosDe(evs, 'PRIMERA_RESPUESTA');
-    const tResol = minutosDe(evs, 'CERRADO');
-    const ratio = m.total > 0 ? m.cerrados / m.total : null;
-    const color = colorSemaforo(ratio, f.semaforo);
-    const trabajado = m.total > 0 || m.cerrados > 0;
-
-    [porAgente[ag], equipo].forEach(a => {
-      if (trabajado) a.dias++;
-      ['sinAtender', 'asignados', 'nuevaConsulta', 'reasignados', 'total', 'cerrados'].forEach(c => { a[c] += m[c]; });
-      if (color) a[color.toLowerCase()]++;
-      a.respuestas += respuestas.length;
-      casos.forEach(n => a.casos.add(n));
-      a.tResp = a.tResp.concat(tResp);
-      a.tPrimera = a.tPrimera.concat(tPrimera);
-      a.tResol = a.tResol.concat(tResol);
-    });
-    const sr = estadisticasMinutos(tResp, f.metaRespuestaMin);
-    const sp = estadisticasMinutos(tPrimera);
-    const so = estadisticasMinutos(tResol);
-    return {
-      dia: dia, agente: nombres[ag],
-      sinAtender: m.sinAtender, asignados: m.asignados, nuevaConsulta: m.nuevaConsulta, reasignados: m.reasignados,
-      total: m.total, cerrados: m.cerrados, pendientes: m.pendientes, pctResolucion: ratio, semaforo: color,
-      respuestas: respuestas.length, casosRespondidos: casos.size,
-      respuestaPromMin: sr.promedio, respuestaMedianaMin: sr.mediana, respuestaEnMeta: sr.pctEnMeta,
-      primeraPromMin: sp.promedio,
-      resolucionPromH: so.promedio == null ? null : Math.round(so.promedio / 60 * 10) / 10,
-    };
-  });
-
-  const aHoras = x => (x == null ? null : Math.round(x / 60 * 10) / 10);
-  const fila = a => {
-    const sr = estadisticasMinutos(a.tResp, f.metaRespuestaMin);
-    const sp = estadisticasMinutos(a.tPrimera);
-    const so = estadisticasMinutos(a.tResol, f.metaResolucionHoras * 60);
-    return {
-      agente: a.agente, dias: a.dias,
-      sinAtender: a.sinAtender, asignados: a.asignados, nuevaConsulta: a.nuevaConsulta, reasignados: a.reasignados,
-      total: a.total, cerrados: a.cerrados, pctResolucion: a.total > 0 ? a.cerrados / a.total : null,
-      verde: a.verde, amarillo: a.amarillo, rojo: a.rojo,
-      respuestas: a.respuestas, casosRespondidos: a.casos.size,
-      respuestasPorDia: a.dias ? Math.round(a.respuestas / a.dias * 10) / 10 : null,
-      respuestasMedidas: sr.n, respuestaPromMin: sr.promedio, respuestaMedianaMin: sr.mediana, respuestaP90Min: sr.p90,
-      respuestaMaxMin: sr.maximo, respuestaEnMeta: sr.pctEnMeta,
-      primerasMedidas: sp.n, primeraPromMin: sp.promedio, primeraMedianaMin: sp.mediana, primeraP90Min: sp.p90,
-      resolucionesMedidas: so.n, resolucionPromH: aHoras(so.promedio), resolucionMedianaH: aHoras(so.mediana),
-      resolucionP90H: aHoras(so.p90), resolucionEnMeta: so.pctEnMeta,
-    };
-  };
-
-  const tipos = f.tipos && f.tipos.length ? f.tipos : null;
-  return {
-    filtros: { desde: f.desde, hasta: f.hasta, agentes: f.agentes.slice(), tipos: tipos },
-    porAgente: f.agentes.map(n => fila(porAgente[normalizarTexto(n)])).concat([fila(equipo)]),
-    porDia: porDia,
-    detalle: propios
-      .filter(e => !tipos || tipos.indexOf(e.tipo) >= 0)
-      .sort((x, y) => String(x.fecha).localeCompare(String(y.fecha)))
-      .map(e => ({
-        dia: e.dia, fecha: e.fecha, tipo: e.tipo, agente: nombres[normalizarTexto(e.agente)],
-        numero: e.numero, asunto: e.asunto, minutos: e.minutos, enlace: e.enlace,
-      })),
-    eventosTotales: propios.length,
-  };
-}
-
 // ===== HelpScout.gs =====
 /**
  * Cliente mínimo de la API v2 de Help Scout (Mailbox API).
@@ -927,27 +521,15 @@ function hsGet_(ruta, params) {
   throw new Error('Help Scout no respondió después de varios intentos: ' + ruta);
 }
 
-/**
- * Recorre todas las páginas de un listado y devuelve los elementos de _embedded[clave].
- * maxPaginas (opcional) corta la lectura después de esa cantidad de páginas.
- */
-function hsListarTodo_(ruta, params, clave, maxPaginas) {
-  return hsListarConTotal_(ruta, params, clave, maxPaginas).items;
-}
-
-/** Igual que hsListarTodo_, pero devuelve también el total que informa Help Scout (para verificar). */
-function hsListarConTotal_(ruta, params, clave, maxPaginas) {
+/** Recorre todas las páginas de un listado y devuelve los elementos de _embedded[clave]. */
+function hsListarTodo_(ruta, params, clave) {
   const todos = [];
-  let total = null;
   for (let pagina = 1; ; pagina++) {
     const data = hsGet_(ruta, Object.assign({}, params, { page: pagina }));
     const items = (data._embedded && data._embedded[clave]) || [];
     Array.prototype.push.apply(todos, items);
-    if (data.page && typeof data.page.totalElements === 'number') total = data.page.totalElements;
     const totalPaginas = data.page ? data.page.totalPages : 1;
-    if (!items.length || pagina >= totalPaginas || (maxPaginas && pagina >= maxPaginas)) {
-      return { items: todos, total: total, completo: !items.length || pagina >= totalPaginas };
-    }
+    if (!items.length || pagina >= totalPaginas) return todos;
   }
 }
 
@@ -1020,7 +602,6 @@ function sincronizar_() {
     tagsReasignacion: CONFIG.TAGS_REASIGNACION,
     transferenciaInternaEsReasignacion: CONFIG.TRANSFERENCIA_INTERNA_ES_REASIGNACION,
     fechaInicio: CONFIG.FECHA_INICIO,
-    incluirRespuestas: true, // cada respuesta queda en HS_Eventos (para el panel y la exportación)
     minutos: (fin, inicio) => minutosGestion(relojLocal_(inicio, tz), relojLocal_(fin, tz), CONFIG.HORARIO_LABORAL),
   };
 
@@ -1503,434 +1084,17 @@ function nombresDias_(dias) {
     : orden.map(d => nombres[d]).join(', ');
 }
 
-// ===== Panel.gs =====
-/**
- * Panel en vivo (página web aparte) — se publica como "Aplicación web" desde el editor de Apps Script.
- *
- * Cómo se mantiene al día sin pasarse de los límites de Help Scout ni de Google:
- *  - Recarga completa (al abrir, cada CONFIG.PANEL.MINUTOS_RECARGA_COMPLETA y al cambiar de día):
- *    casos abiertos de cada agente, cola sin asignar y todo lo movido en el día de jornada.
- *  - Entre recargas, cada CONFIG.PANEL.SEGUNDOS_ACTUALIZACION: UNA consulta con los casos que
- *    cambiaron desde la anterior (normalmente 1 llamada a la API).
- *  - El estado se guarda en la caché del script, así que varias pestañas abiertas comparten datos.
- *  - Los relojes (cuánto lleva esperando cada cliente) corren cada segundo en el navegador.
- */
-const CLAVE_ESTADO_PANEL_ = 'PANEL_ESTADO';
-const CLAVE_RESPUESTA_PANEL_ = 'PANEL_RESPUESTA';
-const CLAVE_OCUPADO_PANEL_ = 'PANEL_OCUPADO';
-
-function doGet() {
-  return paginaPanel_()
-    .setTitle('Centro de control · Soporte en vivo')
-    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
-}
-
-function paginaPanel_() {
-  // En dist/Codigo.gs el HTML va incluido como texto (PANEL_HTML); con clasp se usa el archivo Panel.html.
-  return typeof PANEL_HTML !== 'undefined'
-    ? HtmlService.createHtmlOutput(PANEL_HTML)
-    : HtmlService.createHtmlOutputFromFile('Panel');
-}
-
-/** Lo llama la página cada pocos segundos. Devuelve JSON (texto). */
-function datosPanelEnVivo() {
-  const cache = CacheService.getScriptCache();
-  const reciente = cache.get(CLAVE_RESPUESTA_PANEL_);
-  if (reciente) return reciente;
-  // Si otra pestaña ya está consultando Help Scout, se devuelve lo último que hay.
-  if (cache.get(CLAVE_OCUPADO_PANEL_)) {
-    const ultimo = cache.get(CLAVE_RESPUESTA_PANEL_ + '_ULTIMA');
-    if (ultimo) return ultimo;
-  }
-  try {
-    cache.put(CLAVE_OCUPADO_PANEL_, '1', 90);
-    const respuesta = JSON.stringify(calcularRespuestaPanel_());
-    const cfg = CONFIG.PANEL;
-    if (respuesta.length < 45000) { // límite de 100 KB por clave en la caché
-      cache.put(CLAVE_RESPUESTA_PANEL_, respuesta, Math.max(1, cfg.SEGUNDOS_ACTUALIZACION - 1));
-      cache.put(CLAVE_RESPUESTA_PANEL_ + '_ULTIMA', respuesta, 600);
-    }
-    return respuesta;
-  } catch (e) {
-    console.error(e);
-    return JSON.stringify({ ok: false, error: String(e && e.message || e), ahora: new Date().toISOString() });
-  } finally {
-    cache.remove(CLAVE_OCUPADO_PANEL_);
-  }
-}
-
-function calcularRespuestaPanel_() {
-  const cfg = CONFIG.PANEL;
-  const k = contextoPanel_();
-  let estado = leerCacheGrande_(CLAVE_ESTADO_PANEL_);
-  const vencido = !estado || estado.v !== 2 || estado.dia !== k.hoy ||
-    Date.now() - new Date(estado.base).getTime() > cfg.MINUTOS_RECARGA_COMPLETA * 60000;
-  if (vencido) estado = recargaCompletaPanel_(k);
-  else actualizarPanel_(estado, k);
-  guardarCacheGrande_(CLAVE_ESTADO_PANEL_, estado, 3600);
-
-  const buzones = buzonesPorId_();
-  const panel = armarPanelEnVivo(Object.keys(estado.convs).map(id => estado.convs[id]), {
-    agentes: k.equipo.agentes,
-    nombreBuzon: id => buzones[id] || '',
-    mostrarSinAsignar: cfg.MOSTRAR_SIN_ASIGNAR,
-    maxFeed: 40,
-  });
-  const H = CONFIG.HORARIO_LABORAL;
-  const local = relojLocal_(k.ahora, k.tz);
-  const horaLocal = local.getUTCHours() + local.getUTCMinutes() / 60;
-  return {
-    ok: true,
-    ahora: k.ahora.toISOString(),
-    hoy: k.hoy,
-    tz: k.tz,
-    enHorario: H.dias.indexOf(local.getUTCDay()) >= 0 && horaLocal >= H.inicio && horaLocal < H.fin,
-    horario: H,
-    segundos: cfg.SEGUNDOS_ACTUALIZACION,
-    segundosFueraDeHorario: cfg.SEGUNDOS_FUERA_DE_HORARIO,
-    metaRespuestaMin: cfg.META_RESPUESTA_MIN,
-    alertaSinResponderMin: cfg.ALERTA_SIN_RESPONDER_MIN,
-    ultimaRecargaCompleta: estado.base,
-    verificacion: estado.verificacion,
-    agentes: k.equipo.agentes.map(a => a.nombre),
-    fechaInicio: CONFIG.FECHA_INICIO,
-    metaResolucionHoras: CONFIG.META_RESOLUCION_HORAS,
-    sinVincular: k.equipo.sinEncontrar,
-    panel: panel,
-  };
-}
-
-function contextoPanel_() {
-  const tz = Session.getScriptTimeZone();
-  const H = CONFIG.HORARIO_LABORAL;
-  const ahora = new Date();
-  const hoy = diaDeJornada(relojLocal_(ahora, tz), H);
-  const equipo = resolverEquipo_();
-  const dia = fecha => diaDeJornada(relojLocal_(fecha, tz), H);
-  const agentePorId = id => equipo.porId[id] || null;
-  const minutos = (fin, inicio) => minutosGestion(relojLocal_(inicio, tz), relojLocal_(fin, tz), H);
-  return {
-    tz: tz,
-    ahora: ahora,
-    hoy: hoy,
-    equipo: equipo,
-    mailbox: CONFIG.MAILBOXES_EQUIPO.length ? CONFIG.MAILBOXES_EQUIPO.join(',') : undefined,
-    o: {
-      dia: dia,
-      hoy: hoy,
-      ctxEventos: {
-        incluirRespuestas: true,
-        agentePorId: agentePorId,
-        dia: dia,
-        mailboxesEquipo: CONFIG.MAILBOXES_EQUIPO,
-        tagsReasignacion: CONFIG.TAGS_REASIGNACION,
-        transferenciaInternaEsReasignacion: CONFIG.TRANSFERENCIA_INTERNA_ES_REASIGNACION,
-        fechaInicio: CONFIG.FECHA_INICIO,
-        minutos: minutos,
-      },
-    },
-  };
-}
-
-/** Guarda (o descarta) una conversación en el estado del panel. Siempre llega con sus hilos. */
-function guardarEnPanel_(convs, conv, k) {
-  const c = resumirConversacion(completarHilos_(conv), k.o);
-  if (compactoRelevante(c, id => !!k.equipo.porId[id], CONFIG.PANEL.MOSTRAR_SIN_ASIGNAR)) convs[c.id] = c;
-  else delete convs[c.id];
-}
-
-/** Si el listado no trajo todos los hilos de la conversación, los pide aparte. */
-function completarHilos_(conv) {
-  conv._embedded = conv._embedded || {};
-  const hilos = conv._embedded.threads;
-  if (!hilos || (typeof conv.threads === 'number' && conv.threads > hilos.length)) {
-    conv._embedded.threads = hsHilos_(conv.id);
-  }
-  return conv;
-}
-
-function recargaCompletaPanel_(k) {
-  const cfg = CONFIG.PANEL;
-  const inicio = new Date();
-  const convs = {};
-  const control = []; // lo que dice Help Scout vs. lo que se leyó, para verificar
-  // 1) Casos abiertos de cada agente (con su historial, para saber si el cliente está esperando).
-  k.equipo.agentes.filter(a => a.id).forEach(a => ['active', 'pending'].forEach(estado => {
-    const r = hsListarConTotal_('/conversations',
-      { status: estado, assigned_to: a.id, mailbox: k.mailbox, embed: 'threads' }, 'conversations');
-    r.items.forEach(conv => guardarEnPanel_(convs, conv, k));
-    control.push({ agente: a.nombre, estado: estado, helpScout: r.total, leidos: r.items.length });
-  }));
-  // 2) Cola sin asignar.
-  let colaCompleta = true;
-  if (cfg.MOSTRAR_SIN_ASIGNAR) {
-    const base = { status: 'active', mailbox: k.mailbox, embed: 'threads' };
-    let r;
-    try { // el filtro de búsqueda evita leer los casos ya asignados
-      r = hsListarConTotal_('/conversations', Object.assign({ query: '(assigned:"Unassigned")' }, base),
-        'conversations', cfg.MAX_PAGINAS_SIN_ASIGNAR);
-    } catch (e) {
-      r = hsListarConTotal_('/conversations', base, 'conversations', cfg.MAX_PAGINAS_SIN_ASIGNAR);
-    }
-    r.items
-      .filter(conv => !(conv.assignee && Number(conv.assignee.id) > 0))
-      .forEach(conv => guardarEnPanel_(convs, conv, k));
-    colaCompleta = r.completo;
-  }
-  // 3) Todo lo que se movió en el día de jornada.
-  const desde = Utilities.parseDate(inicioVentanaJornada(k.hoy, CONFIG.HORARIO_LABORAL), k.tz, 'yyyy-MM-dd HH:mm:ss');
-  const dia = hsListarConTotal_('/conversations', {
-    status: 'all', modifiedSince: hsFechaIso_(desde), sortField: 'modifiedAt', sortOrder: 'desc', embed: 'threads', mailbox: k.mailbox,
-  }, 'conversations', cfg.MAX_PAGINAS_DIA);
-  dia.items.forEach(conv => guardarEnPanel_(convs, conv, k));
-
-  const descuadres = control.filter(c => c.helpScout != null && c.helpScout !== c.leidos);
-  return {
-    v: 2, dia: k.hoy, base: inicio.toISOString(), cursor: inicio.toISOString(), convs: convs,
-    verificacion: {
-      hora: inicio.toISOString(),
-      ok: !descuadres.length && dia.completo && colaCompleta,
-      casosAbiertos: control.reduce((s, c) => s + c.leidos, 0),
-      casosDelDia: dia.items.length,
-      avisos: descuadres.map(c => c.agente + ' (' + c.estado + '): Help Scout informa ' + c.helpScout + ' y se leyeron ' + c.leidos)
-        .concat(dia.completo ? [] : ['Hoy hay más movimientos de los que se leyeron: sube CONFIG.PANEL.MAX_PAGINAS_DIA.'])
-        .concat(colaCompleta ? [] : ['La cola sin asignar tiene más casos de los que se muestran: sube MAX_PAGINAS_SIN_ASIGNAR.']),
-    },
-  };
-}
-
-function actualizarPanel_(estado, k) {
-  const inicio = new Date();
-  // 2 minutos de solape: cada conversación se recalcula entera, así que repetirla no duplica nada.
-  const desde = new Date(new Date(estado.cursor).getTime() - 120000);
-  hsListarTodo_('/conversations', {
-    status: 'all', modifiedSince: hsFechaIso_(desde), sortField: 'modifiedAt', sortOrder: 'desc', embed: 'threads', mailbox: k.mailbox,
-  }, 'conversations', 10).forEach(conv => guardarEnPanel_(estado.convs, conv, k));
-  estado.cursor = inicio.toISOString();
-}
-
-function buzonesPorId_() {
-  const cache = CacheService.getScriptCache();
-  const guardado = cache.get('HS_BUZONES');
-  if (guardado) return JSON.parse(guardado);
-  const mapa = {};
-  try {
-    hsMailboxes_().forEach(m => { mapa[m.id] = m.nombre; });
-  } catch (e) {
-    console.warn('No se pudieron leer los buzones: ' + e);
-  }
-  cache.put('HS_BUZONES', JSON.stringify(mapa), 21600);
-  return mapa;
-}
-
-/** CacheService guarda máx. 100 KB por clave: el estado se parte en trozos. */
-function guardarCacheGrande_(clave, obj, segundos) {
-  const texto = JSON.stringify(obj);
-  const TROZO = 40000; // caracteres (con tildes pueden ser más bytes)
-  const valores = {};
-  let n = 0;
-  for (let i = 0; i < texto.length; i += TROZO) valores[clave + '_' + (n++)] = texto.slice(i, i + TROZO);
-  valores[clave + '_n'] = String(n);
-  CacheService.getScriptCache().putAll(valores, segundos);
-}
-
-function leerCacheGrande_(clave) {
-  const cache = CacheService.getScriptCache();
-  const n = Number(cache.get(clave + '_n'));
-  if (!n) return null;
-  const claves = [];
-  for (let i = 0; i < n; i++) claves.push(clave + '_' + i);
-  const trozos = cache.getAll(claves);
-  if (claves.some(c => trozos[c] == null)) return null;
-  try {
-    return JSON.parse(claves.map(c => trozos[c]).join(''));
-  } catch (e) {
-    return null;
-  }
-}
-
-/** Lo llama la página: movimientos de hoy y casos abiertos de una agente (para auditar sus cifras). */
-function detalleAgentePanel(agenteId) {
-  try {
-    const estado = leerCacheGrande_(CLAVE_ESTADO_PANEL_);
-    if (!estado) throw new Error('Todavía no hay datos cargados. Espera la siguiente actualización.');
-    const agente = resolverEquipo_().porId[Number(agenteId)];
-    if (!agente) throw new Error('Agente no encontrada.');
-    const d = detalleAgenteEnVivo(Object.keys(estado.convs).map(id => estado.convs[id]), agente);
-    d.ok = true;
-    d.hoy = estado.dia;
-    return JSON.stringify(d);
-  } catch (e) {
-    return JSON.stringify({ ok: false, error: String(e && e.message || e) });
-  }
-}
-
-/**
- * Lo llama la página: reporte por agente y por día entre dos fechas, a partir de HS_Eventos.
- * @param {{desde: string, hasta: string, agentes: string[], tipos: string[]}} filtros
- */
-function reporteMetricas(filtros) {
-  try {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    if (!ss) {
-      throw new Error('La página no pudo abrir la hoja del tracker. Abre el panel desde la hoja: ' +
-        'menú Help Scout → Panel en vivo → "Abrir aquí".');
-    }
-    const fecha = v => (/^\d{4}-\d{2}-\d{2}$/.test(String(v)) ? String(v) : null);
-    const desde = fecha(filtros && filtros.desde);
-    const hasta = fecha(filtros && filtros.hasta);
-    if (!desde || !hasta || desde > hasta) throw new Error('Rango de fechas no válido.');
-    const equipo = CONFIG.AGENTES.map(a => a.nombre);
-    const pedidos = (filtros.agentes || []).map(normalizarTexto);
-    const agentes = pedidos.length ? equipo.filter(n => pedidos.indexOf(normalizarTexto(n)) >= 0) : equipo;
-    if (!agentes.length) throw new Error('Elige al menos una agente.');
-
-    const tz = ss.getSpreadsheetTimeZone();
-    const reporte = calcularReporte(leerEventosCompletos_(ss), leerFotos_(ss), {
-      desde: desde < CONFIG.FECHA_INICIO ? CONFIG.FECHA_INICIO : desde,
-      hasta: hasta,
-      agentes: agentes,
-      tipos: filtros.tipos || [],
-      metaRespuestaMin: CONFIG.PANEL.META_RESPUESTA_MIN,
-      metaResolucionHoras: CONFIG.META_RESOLUCION_HORAS,
-      semaforo: CONFIG.SEMAFORO,
-    });
-    const props = PropertiesService.getScriptProperties();
-    const ultima = props.getProperty('HS_ULTIMA_SYNC');
-    const pendiente = JSON.parse(props.getProperty('HS_ESTADO_SYNC') || 'null');
-    reporte.ok = true;
-    reporte.generado = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd HH:mm');
-    reporte.ultimaSincronizacion = ultima ? Utilities.formatDate(new Date(ultima), tz, 'yyyy-MM-dd HH:mm') : null;
-    reporte.sincronizacionIncompleta = !!(pendiente && pendiente.pagina > 1);
-    reporte.fechaInicio = CONFIG.FECHA_INICIO;
-    reporte.config = {
-      horario: CONFIG.HORARIO_LABORAL, metaRespuestaMin: CONFIG.PANEL.META_RESPUESTA_MIN,
-      metaResolucionHoras: CONFIG.META_RESOLUCION_HORAS, semaforo: CONFIG.SEMAFORO, zonaHoraria: tz,
-    };
-    return JSON.stringify(reporte);
-  } catch (e) {
-    console.error(e);
-    return JSON.stringify({ ok: false, error: String(e && e.message || e) });
-  }
-}
-
-/** Todas las columnas de HS_Eventos, con la fecha como texto en la zona horaria de la hoja. */
-function leerEventosCompletos_(ss) {
-  const hoja = ss.getSheetByName(CONFIG.HOJAS.eventos);
-  if (!hoja) return [];
-  const tz = ss.getSpreadsheetTimeZone();
-  const formatear = f => Utilities.formatDate(f, tz, 'yyyy-MM-dd');
-  return leerFilas_(hoja).map(f => ({
-    dia: diaDesdeCelda(f[1], formatear),
-    fecha: f[2] instanceof Date ? Utilities.formatDate(f[2], tz, 'yyyy-MM-dd HH:mm:ss') : String(f[2] || ''),
-    tipo: String(f[3]), agente: String(f[4]), numero: Number(f[6]), asunto: String(f[7] || ''),
-    minutos: f[8] === '' || f[8] == null ? null : Number(f[8]), enlace: String(f[10] || ''),
-  }));
-}
-
-/** Menú: abre el panel dentro de la hoja y muestra el enlace de la página aparte. */
-function menuPanelEnVivo() {
-  let url = '';
-  try { url = ScriptApp.getService().getUrl(); } catch (e) { url = ''; }
-  const estilo = 'font-family:Arial,sans-serif;font-size:14px;line-height:1.5';
-  const html = '<div style="' + estilo + '">' + (url
-    ? '<p><b>Página aparte:</b> <a href="' + url + '" target="_blank">abrir el panel en una pestaña nueva</a> (guárdala en favoritos).</p>' +
-      '<p style="color:#555">Si cambiaste el código: <b>Implementar → Gestionar implementaciones → editar → Versión: Nueva versión</b>.</p>'
-    : '<p><b>Página aparte:</b> todavía no está publicada. En <b>Extensiones → Apps Script</b>: <b>Implementar → Nueva implementación → Aplicación web</b>, ' +
-      'ejecutar como <b>Yo</b>, acceso <b>Solo yo</b>.</p>') +
-    '<p><button onclick="google.script.run.withSuccessHandler(google.script.host.close).abrirPanelAqui()" ' +
-    'style="padding:8px 14px;font-size:14px;cursor:pointer">Abrir aquí, dentro de la hoja</button></p></div>';
-  SpreadsheetApp.getUi().showModalDialog(HtmlService.createHtmlOutput(html).setWidth(480).setHeight(230), 'Panel en vivo');
-}
-
-function abrirPanelAqui() {
-  SpreadsheetApp.getUi().showModelessDialog(paginaPanel_().setWidth(1500).setHeight(900), 'Panel en vivo · Soporte');
-}
-
-/**
- * Menú: compara el panel con Help Scout y deja el resultado en la hoja HS_VerificacionPanel,
- * con la lista de casos que el panel considera "esperando respuesta" para revisarlos uno por uno.
- */
-function menuVerificarPanel() {
-  const ss = SpreadsheetApp.getActive();
-  const k = contextoPanel_();
-  const estado = recargaCompletaPanel_(k);
-  const compactos = Object.keys(estado.convs).map(id => estado.convs[id]);
-  const panel = armarPanelEnVivo(compactos, { agentes: k.equipo.agentes, mostrarSinAsignar: CONFIG.PANEL.MOSTRAR_SIN_ASIGNAR, maxFeed: 1 });
-  const total = (agenteId, estadoHs) => hsGet_('/conversations', { status: estadoHs, assigned_to: agenteId, mailbox: k.mailbox }).page.totalElements;
-
-  const filas = [['VERIFICACIÓN DEL PANEL EN VIVO', Utilities.formatDate(new Date(), k.tz, 'dd/MM/yyyy HH:mm:ss'), '', '', '', '', '', '', ''],
-    ['Agente', 'Active en Help Scout', 'Pending en Help Scout', 'Abiertos en Help Scout', 'Abiertos en el panel', '¿Coincide?',
-      'Cliente esperando (panel)', 'En seguimiento (panel)', 'Respuestas hoy (panel)']];
-  panel.agentes.filter(a => a.vinculado).forEach(a => {
-    const act = total(a.id, 'active');
-    const pen = total(a.id, 'pending');
-    filas.push([a.nombre, act, pen, act + pen, a.abiertos, act + pen === a.abiertos ? 'SÍ' : 'NO — avisar',
-      a.esperando.length, a.seguimiento, a.hoy.respuestas]);
-  });
-  filas.push(['', '', '', '', '', '', '', '', '']);
-  filas.push(['CASOS CON EL CLIENTE ESPERANDO (ábrelos en Help Scout: el último mensaje debe ser del cliente)', '', '', '', '', '', '', '', '']);
-  filas.push(['Agente', '# Caso', 'Estado', 'Cliente espera desde', 'Asunto', 'Enlace', '', '', '']);
-  panel.agentes.forEach(a => a.esperando.forEach(t => filas.push([a.nombre, t.numero, t.estado,
-    Utilities.formatDate(new Date(t.esperaDesde), k.tz, 'dd/MM/yyyy HH:mm:ss'), t.asunto, t.url, '', '', ''])));
-  panel.sinAsignar.forEach(t => filas.push(['(sin asignar)', t.numero, t.estado,
-    Utilities.formatDate(new Date(t.esperaDesde), k.tz, 'dd/MM/yyyy HH:mm:ss'), t.asunto, t.url, '', '', '']));
-
-  // Quién escribe los mensajes de hoy: sirve para detectar respuestas automáticas (workflows).
-  const desde = Utilities.parseDate(inicioVentanaJornada(k.hoy, CONFIG.HORARIO_LABORAL), k.tz, 'yyyy-MM-dd HH:mm:ss');
-  const origen = {};
-  hsListarTodo_('/conversations', { status: 'all', modifiedSince: hsFechaIso_(desde), embed: 'threads', mailbox: k.mailbox },
-    'conversations', CONFIG.PANEL.MAX_PAGINAS_DIA).forEach(conv => ((conv._embedded && conv._embedded.threads) || []).forEach(h => {
-    if (k.o.dia(new Date(h.createdAt)) !== k.hoy || ['message', 'chat', 'phone', 'customer'].indexOf(h.type) < 0) return;
-    const clave = [h.type, (h.createdBy || {}).type || '', (h.source || {}).type || '', (h.source || {}).via || '',
-      (h.action || {}).type || '', h.savedReplyId ? 'con respuesta guardada' : ''].join(' | ');
-    origen[clave] = (origen[clave] || 0) + 1;
-  }));
-  filas.push(['', '', '', '', '', '', '', '', '']);
-  filas.push(['MENSAJES DE HOY POR ORIGEN (tipo | autor | fuente | vía | acción | respuesta guardada)', 'Cantidad', '', '', '', '', '', '', '']);
-  Object.keys(origen).sort().forEach(c => filas.push([c, origen[c], '', '', '', '', '', '', '']));
-
-  let hoja = ss.getSheetByName('HS_VerificacionPanel');
-  if (!hoja) hoja = ss.insertSheet('HS_VerificacionPanel', ss.getNumSheets());
-  hoja.clear();
-  hoja.getRange(1, 1, filas.length, 9).setValues(filas);
-  hoja.getRange(1, 1, 2, 9).setFontWeight('bold');
-  ss.setActiveSheet(hoja);
-  const mal = filas.filter(f => String(f[5]).indexOf('NO') === 0).length;
-  SpreadsheetApp.getUi().alert(mal
-    ? '⚠️ Hay ' + mal + ' agente(s) cuyo total no coincide con Help Scout. Revisa la hoja HS_VerificacionPanel.'
-    : '✅ Los casos abiertos del panel coinciden con Help Scout para todas las agentes.\n' +
-      'En la hoja HS_VerificacionPanel está la lista de casos "esperando" para revisarlos uno por uno.');
-}
-
-/** Menú: vuelve a leer Help Scout desde FECHA_INICIO y agrega a HS_Eventos lo que falte (sin borrar nada). */
-function menuCompletarHistorial() {
-  const ui = SpreadsheetApp.getUi();
-  const r = ui.alert('Completar historial',
-    'Se volverá a leer Help Scout desde ' + CONFIG.FECHA_INICIO + ' para agregar a HS_Eventos cada respuesta de las agentes ' +
-    '(necesario para exportar respuestas y tiempos de respuesta de días pasados). No se borra nada.\n' +
-    'Tarda varias sincronizaciones (15–60 min). ¿Continuar?', ui.ButtonSet.YES_NO);
-  if (r !== ui.Button.YES) return;
-  const tz = SpreadsheetApp.getActive().getSpreadsheetTimeZone();
-  PropertiesService.getScriptProperties().setProperty('HS_ESTADO_SYNC', JSON.stringify({
-    desde: hsFechaIso_(Utilities.parseDate(CONFIG.FECHA_INICIO, tz, 'yyyy-MM-dd')), pagina: 1,
-  }));
-  ui.alert('Listo. La sincronización automática irá completando el historial. Revisa "Help Scout → Ver estado".');
-}
-
 // ===== Menu.gs =====
 /**
  * Menú "Help Scout" en la hoja y activadores automáticos.
  */
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('Help Scout')
+    .addItem('Panel en vivo', 'menuPanelEnVivo')
+    .addSeparator()
     .addItem('1. Configurar credenciales', 'menuConfigurarCredenciales')
     .addItem('2. Ver usuarios y buzones de Help Scout', 'menuListarUsuarios')
     .addItem('3. Activar sincronización automática', 'menuActivar')
-    .addSeparator()
-    .addItem('Panel en vivo', 'menuPanelEnVivo')
-    .addItem('Verificar panel contra Help Scout', 'menuVerificarPanel')
-    .addItem('Completar historial de respuestas (para exportar)', 'menuCompletarHistorial')
     .addSeparator()
     .addItem('Sincronizar ahora', 'menuSincronizar')
     .addItem('Tomar foto de inicio de jornada ahora', 'menuFoto')
@@ -2077,5 +1241,492 @@ function eliminarActivadores_() {
     .forEach(t => ScriptApp.deleteTrigger(t));
 }
 
+// ===== Logica.gs =====
+/** GENERADO desde panel/logica.js con `npm run build`: no editar aquí. */
+var Logica = (function () {
+  var module = { exports: {} };
+/**
+ * Lógica pura del panel (la usan el servidor, el navegador y las pruebas).
+ *
+ * Todo sale del historial de mensajes ("threads") de cada conversación de Help Scout:
+ *  - Cliente esperando: el caso está Active o Pending y el último mensaje es del cliente.
+ *  - Reloj de espera: desde el PRIMER mensaje del cliente que sigue sin contestar.
+ * Las notas internas, las asignaciones y los cambios de estado no cuentan como respuesta.
+ * Las cifras del día (respuestas, resueltos, tiempos...) NO se calculan aquí: vienen de los
+ * reportes oficiales de Help Scout.
+ */
+(function (raiz, fabrica) {
+  if (typeof module === 'object' && module.exports) module.exports = fabrica();
+  else raiz.Logica = fabrica();
+})(typeof self !== 'undefined' ? self : this, function () {
+  'use strict';
+  var TIPOS_MENSAJE = ['message', 'chat', 'phone'];
+
+  function hilosPublicados(conv) {
+    return ((conv._embedded && conv._embedded.threads) || [])
+      .filter(function (h) { return !h.state || h.state === 'published'; })
+      .slice()
+      .sort(function (a, b) { return (new Date(a.createdAt) - new Date(b.createdAt)) || (a.id - b.id); });
+  }
+  function idUsuario(p) { return p && Number(p.id) > 0 ? Number(p.id) : null; }
+  function esDelCliente(h) { return h.type === 'customer' || (h.createdBy || {}).type === 'customer'; }
+  function esRespuesta(h) { return !esDelCliente(h) && (h.createdBy || {}).type === 'user' && TIPOS_MENSAJE.indexOf(h.type) >= 0; }
+
+  /**
+   * Conversación de Help Scout (con _embedded.threads) → resumen compacto.
+   * @param {Object} conv
+   * @param {Date|string} desdeHoy  inicio del día local: los movimientos desde ahí van en `mv`
+   * @return {{id, n, s, c, st, a, mb, w, mv}}
+   *   w  = fecha ISO desde la que espera el cliente (null si nadie espera)
+   *   mv = movimientos de hoy: [tipo, usuarioId, fechaIso]
+   *        'C' mensaje del cliente · 'R' respuesta de un usuario · 'X' cierre · 'A' asignación (usuarioId = a quién)
+   */
+  function resumirConversacion(conv, desdeHoy) {
+    var corte = new Date(desdeHoy).getTime();
+    var publicada = !conv.state || conv.state === 'published';
+    var abierta = publicada && (conv.status === 'active' || conv.status === 'pending');
+    var cliente = conv.primaryCustomer || {};
+    var nombre = [cliente.first, cliente.last].filter(Boolean).join(' ') || cliente.email || '';
+    var mv = [];
+    var desde = null, estado = null, asignado;
+
+    hilosPublicados(conv).forEach(function (h) {
+      var fecha = new Date(h.createdAt);
+      var hoy = fecha.getTime() >= corte;
+      var autor = h.createdBy || {};
+      var previo = estado;
+      if (h.status && h.status !== 'nochange') estado = h.status;
+
+      if ('assignedTo' in h) {
+        var nuevo = idUsuario(h.assignedTo);
+        if (nuevo !== null && nuevo !== asignado && hoy) mv.push(['A', nuevo, fecha.toISOString()]); // cambió de manos
+        asignado = nuevo;
+      }
+      if (esDelCliente(h)) {
+        if (!desde) desde = fecha;
+        if (hoy) mv.push(['C', 0, fecha.toISOString()]);
+        return;
+      }
+      if (esRespuesta(h)) {
+        desde = null; // le respondieron
+        if (hoy) mv.push(['R', Number(autor.id), fecha.toISOString()]);
+      }
+      if (estado === 'closed' && previo !== 'closed') {
+        desde = null; // se cerró el caso
+        if (hoy && autor.type === 'user') mv.push(['X', Number(autor.id), fecha.toISOString()]);
+      }
+    });
+
+    return {
+      id: conv.id,
+      n: conv.number,
+      s: String(conv.subject || '(sin asunto)').slice(0, 140),
+      c: String(nombre).slice(0, 60),
+      st: publicada ? conv.status : 'deleted',
+      a: idUsuario(conv.assignee),
+      mb: conv.mailboxId || null,
+      w: abierta && desde ? desde.toISOString() : null,
+      mv: mv,
+    };
+  }
+
+  /** ¿Hay que conservar esta conversación en el panel? */
+  function esRelevante(c, equipo, mostrarSinAsignar) {
+    var abierta = c.st === 'active' || c.st === 'pending';
+    if (abierta && c.a && equipo[c.a]) return true;
+    if (abierta && !c.a && mostrarSinAsignar) return true;
+    return c.mv.some(function (m) { return m[0] !== 'C' && !!equipo[m[1]]; });
+  }
+
+  var URL_CASO = 'https://secure.helpscout.net/conversation/';
+
+  /**
+   * @param {Object[]} compactos
+   * @param {{id: number, nombre: string}[]} agentes  (id null si no está vinculada en Help Scout)
+   * @param {{buzones?: Object, mostrarSinAsignar?: boolean, maxFeed?: number}} op
+   */
+  function armarPanel(compactos, agentes, op) {
+    op = op || {};
+    var equipo = {};
+    agentes.forEach(function (a) { if (a.id) equipo[a.id] = a; });
+    var nombre = function (id) { return equipo[id] ? equipo[id].nombre : ''; };
+    var ticket = function (c) {
+      return {
+        id: c.id, numero: c.n, asunto: c.s, cliente: c.c, estado: c.st, esperaDesde: c.w,
+        agenteId: c.a && equipo[c.a] ? c.a : null, agente: nombre(c.a),
+        buzon: (op.buzones && op.buzones[c.mb]) || '', url: URL_CASO + c.id + '/' + c.n,
+      };
+    };
+    var porEspera = function (x, y) { return String(x.esperaDesde || '9').localeCompare(String(y.esperaDesde || '9')); };
+
+    var abiertos = [], sinAsignar = [], feed = [], ultima = {}, respuestas = {};
+    compactos.forEach(function (c) {
+      var abierta = c.st === 'active' || c.st === 'pending';
+      var delEquipo = !!(c.a && equipo[c.a]);
+      if (abierta && delEquipo) abiertos.push(ticket(c));
+      if (abierta && !c.a && op.mostrarSinAsignar !== false && c.w) sinAsignar.push(ticket(c));
+      c.mv.forEach(function (m) {
+        var tipo = m[0], quien = m[1], fecha = m[2];
+        if (tipo === 'C') {
+          if (delEquipo || !c.a) feed.push({ fecha: fecha, tipo: 'CLIENTE', agente: delEquipo ? nombre(c.a) : '', numero: c.n, asunto: c.s, url: URL_CASO + c.id + '/' + c.n });
+          return;
+        }
+        if (!equipo[quien]) return;
+        if (tipo === 'R') {
+          respuestas[quien] = (respuestas[quien] || 0) + 1;
+          if (!ultima[quien] || fecha > ultima[quien]) ultima[quien] = fecha;
+        }
+        feed.push({ fecha: fecha, tipo: { R: 'RESPUESTA', X: 'CERRADO', A: 'ASIGNADO' }[tipo], agente: nombre(quien), numero: c.n, asunto: c.s, url: URL_CASO + c.id + '/' + c.n });
+      });
+    });
+
+    var filas = agentes.map(function (a) {
+      var suyos = abiertos.filter(function (t) { return t.agenteId === a.id; });
+      var esperando = suyos.filter(function (t) { return t.esperaDesde; }).sort(porEspera);
+      return {
+        id: a.id, nombre: a.nombre, vinculado: !!a.id,
+        esperando: esperando,
+        enSeguimiento: suyos.filter(function (t) { return !t.esperaDesde; }).sort(function (x, y) { return x.numero - y.numero; }),
+        seguimiento: suyos.length - esperando.length,
+        abiertos: suyos.length,
+        activos: suyos.filter(function (t) { return t.estado === 'active'; }).length,
+        pendientes: suyos.filter(function (t) { return t.estado === 'pending'; }).length,
+        ultimaRespuesta: ultima[a.id] || null,
+        respuestasVistas: respuestas[a.id] || 0, // conteo directo de hoy, solo para contrastar con el reporte
+      };
+    });
+    var suma = function (k) { return filas.reduce(function (s, f) { return s + (k === 'esperando' ? f.esperando.length : f[k]); }, 0); };
+    feed.sort(function (x, y) { return x.fecha < y.fecha ? 1 : x.fecha > y.fecha ? -1 : 0; });
+    return {
+      agentes: filas,
+      sinAsignar: sinAsignar.sort(porEspera),
+      equipo: { esperando: suma('esperando'), seguimiento: suma('seguimiento'), abiertos: suma('abiertos'), activos: suma('activos'), pendientes: suma('pendientes') },
+      feed: feed.slice(0, op.maxFeed || 60),
+      movimientos: feed.length,
+    };
+  }
+
+  return { resumirConversacion: resumirConversacion, esRelevante: esRelevante, armarPanel: armarPanel };
+});
+
+  return module.exports;
+})();
+
+// ===== PanelServidor.gs =====
+/**
+ * PANEL EN VIVO — servidor (Apps Script).
+ *
+ * Es independiente del tracker: no lee ni escribe ninguna hoja y no usa sus reglas de conteo.
+ *  - Lo que pasa "en este momento" (casos abiertos, cliente esperando, relojes, actividad) se lee
+ *    directo de las conversaciones de Help Scout.
+ *  - Las cifras del día y las exportaciones son las de los REPORTES OFICIALES de Help Scout
+ *    (los mismos números de su sección Reports), sin recálculo. Requieren plan Plus o Pro.
+ * Del tracker solo comparte: las credenciales guardadas, CONFIG.AGENTES y CONFIG.HORARIO_LABORAL.
+ *
+ * La página (Panel.html) guarda el estado en el navegador y llama a apiPanel(ruta) cada pocos segundos.
+ */
+const PANEL = {
+  // Cada cuántos segundos la página consulta Help Scout (dentro y fuera de la jornada).
+  SEGUNDOS_ACTUALIZACION: 5,
+  SEGUNDOS_FUERA_DE_HORARIO: 60,
+  // Cada cuántos segundos se refrescan los reportes oficiales del día.
+  SEGUNDOS_REPORTES: 60,
+  // Cada cuántos minutos se relee todo y se compara con los totales que informa Help Scout.
+  MINUTOS_RECARGA_COMPLETA: 5,
+  // Reloj de espera de cada cliente: amarillo a la mitad de la meta, rojo al llegar.
+  META_RESPUESTA_MIN: 60,
+  // Estado de la agente si tiene clientes esperando y no responde: amarillo / rojo (minutos).
+  ALERTA_SIN_RESPONDER_MIN: [10, 30],
+  // true: los tiempos de los reportes cuentan solo el horario de oficina configurado EN Help Scout
+  // (Manage → Company → Office Hours). Si no está activado allá, Help Scout ignora la opción.
+  REPORTES_EN_HORARIO_DE_OFICINA: false,
+  // Mostrar la cola de casos activos sin asignar (de CONFIG.MAILBOXES_EQUIPO, o de todos los buzones si está vacío).
+  MOSTRAR_SIN_ASIGNAR: true,
+};
+
+// Campos del reporte de usuario (GET /v2/reports/user → "current"), tal cual los entrega Help Scout.
+const CAMPOS_REPORTE_ = ['totalDays', 'totalConversations', 'conversationsCreated', 'customersHelped', 'totalReplies', 'repliesPerDay',
+  'conversationsPerDay', 'resolved', 'resolvedOnFirstReply', 'percentResolvedOnFirstReply', 'repliesToResolve', 'closed',
+  'responseTime', 'resolutionTime', 'handleTime', 'happinessScore', 'busiestDay'];
+
+function doGet() {
+  return paginaPanel_()
+    .setTitle('Soporte · Control en vivo')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+function paginaPanel_() {
+  // En dist/Codigo.gs la página va incluida como texto (PANEL_HTML); con clasp se usa el archivo Panel.html.
+  return typeof PANEL_HTML !== 'undefined'
+    ? HtmlService.createHtmlOutput(PANEL_HTML)
+    : HtmlService.createHtmlOutputFromFile('Panel');
+}
+
+/**
+ * Única función que llama la página. `ruta` es como '/api/cambios?desde=2026-11-12T15:00:00Z'.
+ * @return {string} JSON: { ok: true, ahora, ... } o { ok: false, error }
+ */
+function apiPanel(ruta) {
+  try {
+    const partes = String(ruta).split('?');
+    const q = {};
+    (partes[1] || '').split('&').forEach(par => {
+      if (!par) return;
+      const i = par.indexOf('=');
+      q[decodeURIComponent(i < 0 ? par : par.slice(0, i))] = i < 0 ? '' : decodeURIComponent(par.slice(i + 1));
+    });
+    const rutas = {
+      '/api/equipo': panelEquipo_, '/api/abiertos': panelAbiertos_, '/api/cambios': panelCambios_,
+      '/api/reporte': panelReporte_, '/api/reporte-dias': panelReporteDias_, '/api/reporte-casos': panelReporteCasos_,
+    };
+    const manejador = rutas[partes[0]];
+    if (!manejador) throw new Error('Ruta desconocida: ' + partes[0]);
+    const datos = manejador(q);
+    datos.ok = true;
+    datos.ahora = new Date().toISOString();
+    return JSON.stringify(datos);
+  } catch (e) {
+    console.error(e);
+    return JSON.stringify({ ok: false, error: String((e && e.message) || e) });
+  }
+}
+
+// ---------- Fechas ----------
+function panelTz_() { return Session.getScriptTimeZone(); }
+/** Instante en que el reloj local marca 'yyyy-MM-dd' + 'HH:mm:ss'. */
+function panelInstante_(dia, hora) { return Utilities.parseDate(dia + ' ' + hora, panelTz_(), 'yyyy-MM-dd HH:mm:ss'); }
+function panelHoy_(fecha) { return Utilities.formatDate(fecha || new Date(), panelTz_(), 'yyyy-MM-dd'); }
+function panelInicioHoy_() { return panelInstante_(panelHoy_(), '00:00:00'); }
+function panelEnHorario_(fecha) {
+  const H = CONFIG.HORARIO_LABORAL;
+  const local = relojLocal_(fecha, panelTz_()); // campos UTC = hora local
+  const hora = local.getUTCHours() + local.getUTCMinutes() / 60;
+  return H.dias.indexOf(local.getUTCDay()) >= 0 && hora >= H.inicio && hora < H.fin;
+}
+function panelEsDia_(v) { return /^\d{4}-\d{2}-\d{2}$/.test(String(v)) && !isNaN(Date.parse(v + 'T00:00:00Z')); }
+
+// ---------- Help Scout ----------
+function panelBuzones_() { return CONFIG.MAILBOXES_EQUIPO.length ? CONFIG.MAILBOXES_EQUIPO.join(',') : undefined; }
+
+/**
+ * Recorre las páginas de un listado desde `desdePagina`, como máximo `maxPaginas`.
+ * @return {{items: Object[], total: number|null, completo: boolean, siguiente: number|null}}
+ *   total = el que informa Help Scout (para verificar que se leyó todo)
+ */
+function panelListar_(ruta, params, clave, maxPaginas, desdePagina) {
+  const items = [];
+  let total = null;
+  const primera = desdePagina || 1;
+  for (let pagina = primera; ; pagina++) {
+    const d = hsGet_(ruta, Object.assign({}, params, { page: pagina }));
+    const trozo = (d._embedded && d._embedded[clave]) || [];
+    Array.prototype.push.apply(items, trozo);
+    if (d.page && typeof d.page.totalElements === 'number') total = d.page.totalElements;
+    const paginas = d.page ? d.page.totalPages : 1;
+    const fin = !trozo.length || pagina >= paginas;
+    if (fin || (maxPaginas && pagina - primera + 1 >= maxPaginas)) {
+      return { items: items, total: total, completo: fin, siguiente: fin ? null : pagina + 1 };
+    }
+  }
+}
+
+/** Conversaciones → compactos. Si el listado no trajo todos los hilos de una conversación, los pide aparte. */
+function panelCompactar_(convs, desdeHoy) {
+  return convs.map(conv => {
+    conv._embedded = conv._embedded || {};
+    const hilos = conv._embedded.threads;
+    const sinNotas = Array.isArray(hilos) ? hilos.filter(h => h.type !== 'note').length : -1;
+    if (sinNotas < 0 || (typeof conv.threads === 'number' && conv.threads > sinNotas)) {
+      conv._embedded.threads = hsHilos_(conv.id);
+    }
+    return Logica.resumirConversacion(conv, desdeHoy);
+  });
+}
+
+// ---------- Rutas: en este momento ----------
+function panelEquipo_() {
+  CacheService.getScriptCache().remove('HS_USUARIOS');
+  const equipo = resolverEquipo_();
+  const buzones = {};
+  try {
+    hsMailboxes_().forEach(m => { buzones[m.id] = m.nombre; });
+  } catch (e) { /* los nombres de buzón son solo informativos */ }
+  const ahora = new Date();
+  return {
+    agentes: equipo.agentes,
+    sinVincular: equipo.sinEncontrar,
+    buzones: buzones,
+    hoy: panelHoy_(ahora),
+    inicioHoy: panelInicioHoy_().toISOString(),
+    enHorario: panelEnHorario_(ahora),
+    config: {
+      tz: panelTz_(), horario: CONFIG.HORARIO_LABORAL,
+      segundos: PANEL.SEGUNDOS_ACTUALIZACION, segundosFueraDeHorario: PANEL.SEGUNDOS_FUERA_DE_HORARIO,
+      segundosReportes: PANEL.SEGUNDOS_REPORTES, minutosRecarga: PANEL.MINUTOS_RECARGA_COMPLETA,
+      metaRespuestaMin: PANEL.META_RESPUESTA_MIN, alertaSinResponderMin: PANEL.ALERTA_SIN_RESPONDER_MIN,
+      horarioDeOficina: PANEL.REPORTES_EN_HORARIO_DE_OFICINA, mostrarSinAsignar: PANEL.MOSTRAR_SIN_ASIGNAR,
+    },
+  };
+}
+
+/** Casos abiertos (Active + Pending) de una agente con su historial, o la cola sin asignar (agente=sin). */
+function panelAbiertos_(q) {
+  const desdeHoy = panelInicioHoy_();
+  const mailbox = panelBuzones_();
+  if (q.agente === 'sin') {
+    const base = { status: 'active', mailbox: mailbox, embed: 'threads' };
+    let r;
+    try { // el filtro de búsqueda evita leer los casos ya asignados
+      r = panelListar_('/conversations', Object.assign({ query: '(assigned:"Unassigned")' }, base), 'conversations', 6);
+    } catch (e) {
+      r = panelListar_('/conversations', base, 'conversations', 6);
+    }
+    const sinDueno = r.items.filter(c => !(c.assignee && Number(c.assignee.id) > 0));
+    return { compactos: panelCompactar_(sinDueno, desdeHoy), completo: r.completo };
+  }
+  const agente = resolverEquipo_().porId[Number(q.agente)];
+  if (!agente) throw new Error('Agente no reconocida.');
+  const totales = {};
+  let convs = [];
+  ['active', 'pending'].forEach(estado => {
+    const r = panelListar_('/conversations', { status: estado, assigned_to: agente.id, mailbox: mailbox, embed: 'threads' }, 'conversations');
+    totales[estado] = { helpScout: r.total, leidos: r.items.length };
+    convs = convs.concat(r.items);
+  });
+  return { agente: agente.id, compactos: panelCompactar_(convs, desdeHoy), totales: totales };
+}
+
+/** Conversaciones modificadas desde `desde` (ISO), con su historial. La página lo llama cada pocos segundos. */
+function panelCambios_(q) {
+  const inicio = new Date();
+  const desde = new Date(q.desde || '');
+  if (isNaN(desde.getTime()) || inicio - desde > 3 * 86400000 || desde > inicio) throw new Error('Parámetro "desde" no válido.');
+  const r = panelListar_('/conversations', {
+    status: 'all', modifiedSince: hsFechaIso_(desde), sortField: 'modifiedAt', sortOrder: 'asc', embed: 'threads', mailbox: panelBuzones_(),
+  }, 'conversations', 3, Math.max(1, Number(q.pagina) || 1));
+  return { compactos: panelCompactar_(r.items, panelInicioHoy_()), siguiente: r.siguiente, total: r.total, cursor: inicio.toISOString() };
+}
+
+// ---------- Rutas: reportes oficiales de Help Scout ----------
+function panelRango_(q) {
+  if (!panelEsDia_(q.desde) || !panelEsDia_(q.hasta) || q.desde > q.hasta) throw new Error('Rango de fechas no válido.');
+  const dias = Math.round((Date.parse(q.hasta) - Date.parse(q.desde)) / 86400000) + 1;
+  return {
+    desde: q.desde, hasta: q.hasta, dias: dias,
+    start: hsFechaIso_(panelInstante_(q.desde, '00:00:00')),
+    end: hsFechaIso_(panelInstante_(q.hasta, '23:59:59')),
+    // Help Scout: por día hasta 60 días, por semana hasta 1 año, por mes desde 61 días.
+    vista: dias <= 60 ? 'day' : dias <= 365 ? 'week' : 'month',
+  };
+}
+
+function panelParamsReporte_(r, usuario, q) {
+  const oficina = 'oficina' in q ? q.oficina === '1' : PANEL.REPORTES_EN_HORARIO_DE_OFICINA;
+  return { user: usuario, start: r.start, end: r.end, mailboxes: panelBuzones_(), officeHours: oficina ? 'true' : undefined };
+}
+
+function panelAgentesPedidos_(q) {
+  const ids = String(q.agentes || '').split(',').map(Number).filter(Boolean);
+  const lista = resolverEquipo_().agentes.filter(a => a.id && (!ids.length || ids.indexOf(a.id) >= 0));
+  if (!lista.length) throw new Error('No hay agentes vinculadas con Help Scout para este reporte.');
+  return lista;
+}
+
+/** Si Help Scout rechaza los reportes por plan o permisos, devuelve un aviso entendible; si no, null. */
+function panelSinReportes_(e) {
+  const m = String((e && e.message) || '').match(/Error de Help Scout (\d{3})/);
+  if (!m || ['401', '402', '403', '404'].indexOf(m[1]) < 0) return null;
+  return 'Help Scout no permitió consultar los reportes (código ' + m[1] + '). La API de reportes solo está incluida en los planes Plus y Pro, ' +
+    'y la app debe pertenecer a un usuario con acceso a Reports.';
+}
+
+/** Resumen por agente del periodo (GET /v2/reports/user). */
+function panelReporte_(q) {
+  const r = panelRango_(q);
+  const agentes = panelAgentesPedidos_(q);
+  try {
+    const filas = agentes.map(a => {
+      const actual = hsGet_('/reports/user', panelParamsReporte_(r, a.id, q)).current || {};
+      const fila = { id: a.id, nombre: a.nombre };
+      CAMPOS_REPORTE_.forEach(c => { fila[c] = actual[c] == null ? null : actual[c]; });
+      return fila;
+    });
+    return { disponible: true, rango: r, filas: filas };
+  } catch (e) {
+    const aviso = panelSinReportes_(e);
+    if (!aviso) throw e;
+    return { disponible: false, motivo: aviso, rango: r, filas: [] };
+  }
+}
+
+/** Series por día / semana / mes: respuestas, resueltos y clientes ayudados de cada agente. */
+function panelReporteDias_(q) {
+  const r = panelRango_(q);
+  const filas = [];
+  panelAgentesPedidos_(q).forEach(a => {
+    const p = Object.assign(panelParamsReporte_(r, a.id, q), { viewBy: r.vista });
+    const porFecha = {};
+    const poner = (ruta, campo, origen) => (hsGet_(ruta, p).current || []).forEach(x => {
+      const k = String(x.date || x.start || '').slice(0, 10);
+      if (!k) return;
+      porFecha[k] = porFecha[k] || { fecha: k, id: a.id, nombre: a.nombre, respuestas: 0, resueltos: 0, clientes: 0 };
+      porFecha[k][campo] = x[origen] == null ? 0 : x[origen];
+    });
+    poner('/reports/user/replies', 'respuestas', 'replies');
+    poner('/reports/user/resolutions', 'resueltos', 'resolved');
+    poner('/reports/user/customers-helped', 'clientes', 'customers');
+    Object.keys(porFecha).sort().forEach(k => filas.push(porFecha[k]));
+  });
+  return { rango: r, vista: r.vista, filas: filas };
+}
+
+/** Conversaciones del periodo de una agente, con sus tiempos (GET /v2/reports/user/conversation-history). */
+function panelReporteCasos_(q) {
+  const r = panelRango_(q);
+  const agente = resolverEquipo_().porId[Number(q.agente)];
+  if (!agente) throw new Error('Agente no reconocida.');
+  const primera = Math.max(1, Number(q.pagina) || 1);
+  const filas = [];
+  let total = null, siguiente = null;
+  for (let pagina = primera; pagina < primera + 4; pagina++) {
+    const d = hsGet_('/reports/user/conversation-history',
+      Object.assign(panelParamsReporte_(r, agente.id, q), { page: pagina, sortField: 'number', sortOrder: 'ASC' }));
+    const resultados = d.results || [];
+    if (d.count != null) total = d.count;
+    resultados.forEach(x => filas.push({
+      id: x.id, numero: x.number, estado: x.status || '',
+      cliente: (x.customers || []).map(c => c.name).filter(Boolean).join(', '),
+      respuestas: x.repliesSent == null ? null : x.repliesSent,
+      primeraRespuesta: x.firstResponseTime == null ? null : x.firstResponseTime,
+      respuesta: x.responseTime == null ? null : x.responseTime,
+      resolucion: x.resolveTime == null ? null : x.resolveTime,
+      gestion: x.avgHandleTime == null ? null : x.avgHandleTime,
+      url: 'https://secure.helpscout.net/conversation/' + x.id + '/' + x.number,
+    }));
+    if (pagina >= (d.pages || 1) || !resultados.length) { siguiente = null; break; }
+    siguiente = pagina + 1;
+  }
+  return { rango: r, agente: agente.id, nombre: agente.nombre, filas: filas, total: total, siguiente: siguiente };
+}
+
+// ---------- Menú de la hoja ----------
+/** Muestra el enlace de la página y permite abrirla dentro de la hoja. */
+function menuPanelEnVivo() {
+  let url = '';
+  try { url = ScriptApp.getService().getUrl(); } catch (e) { url = ''; }
+  const html = '<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.5">' + (url
+    ? '<p><b>Enlace del panel:</b> <a href="' + url + '" target="_blank">abrir en una pestaña nueva</a>. Guárdalo en favoritos: es siempre el mismo.</p>' +
+      '<p style="color:#555">Si cambiaste el código: <b>Implementar → Gestionar implementaciones → editar → Versión: Nueva versión</b>.</p>'
+    : '<p><b>El enlace todavía no existe.</b> En <b>Extensiones → Apps Script</b>: <b>Implementar → Nueva implementación → Aplicación web</b>, ' +
+      'ejecutar como <b>Yo</b>, acceso <b>Solo yo</b>.</p>') +
+    '<p><button onclick="google.script.run.withSuccessHandler(google.script.host.close).abrirPanelAqui()" ' +
+    'style="padding:8px 14px;font-size:14px;cursor:pointer">Abrir aquí, dentro de la hoja</button></p></div>';
+  SpreadsheetApp.getUi().showModalDialog(HtmlService.createHtmlOutput(html).setWidth(480).setHeight(230), 'Panel en vivo');
+}
+
+function abrirPanelAqui() {
+  SpreadsheetApp.getUi().showModelessDialog(paginaPanel_().setWidth(1500).setHeight(900), 'Soporte · Control en vivo');
+}
+
 // ===== Panel.html =====
-const PANEL_HTML = "<!DOCTYPE html>\n<html lang=\"es\">\n<head>\n<base target=\"_top\">\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>Soporte · Control en vivo</title>\n<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>\n<link href=\"https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap\" rel=\"stylesheet\">\n<style>\n:root {\n  --bg: #0B0B0C;\n  --surface: #111113;\n  --raised: #18181B;\n  --line: #232327;\n  --line-2: #33333A;\n  --text: #F2F2F3;\n  --text-2: #A6A6AE;\n  --text-3: #85858E;\n  --ok: #5BC79A;\n  --warn: #E2B340;\n  --bad: #F2716B;\n  --r: 6px;\n}\n* { box-sizing: border-box; }\nhtml, body { margin: 0; background: var(--bg); color: var(--text); }\nbody {\n  font-family: 'Montserrat', 'Helvetica Neue', Arial, sans-serif; font-size: 13px; line-height: 1.45; font-weight: 500;\n  font-feature-settings: 'tnum' 1, 'lnum' 1; -webkit-font-smoothing: antialiased;\n}\na { color: inherit; text-decoration: none; }\na:hover { text-decoration: underline; text-underline-offset: 3px; }\nbutton, input, select { font: inherit; color: inherit; }\n:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }\n.pagina { max-width: 1680px; margin: 0 auto; padding: 0 28px 48px; }\n.num { text-align: right; white-space: nowrap; }\n.ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); } .tenue { color: var(--text-2); }\n\n/* Cabecera */\n.cab { position: sticky; top: 0; z-index: 5; background: var(--bg); border-bottom: 1px solid var(--line); }\n.cab-in { max-width: 1680px; margin: 0 auto; padding: 0 28px; min-height: 60px; display: flex; align-items: center; gap: 12px 24px; flex-wrap: wrap; }\n.marca { display: flex; align-items: baseline; gap: 12px; margin-right: auto; padding: 14px 0; }\n.marca b { font-size: 15px; font-weight: 700; letter-spacing: .01em; }\n.marca span { font-size: 13px; color: var(--text-2); padding-left: 12px; border-left: 1px solid var(--line-2); }\n.estado-con { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }\n.estado-con i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }\n.hora { text-align: right; line-height: 1.25; }\n.hora b { display: block; font-size: 17px; font-weight: 600; letter-spacing: .02em; }\n.hora span { font-size: 11.5px; color: var(--text-2); }\n.btn { height: 36px; padding: 0 14px; border-radius: var(--r); border: 1px solid var(--line-2); background: transparent; font-weight: 600; font-size: 12.5px; cursor: pointer; white-space: nowrap; }\n.btn:hover { background: var(--raised); }\n.btn.principal { background: var(--text); color: var(--bg); border-color: var(--text); }\n.btn.principal:hover { background: #D9D9DC; }\n.btn:disabled { opacity: .5; cursor: default; }\n.btn.chico { height: 28px; padding: 0 10px; font-size: 11.5px; }\n.avance { height: 1px; }\n.avance i { display: block; height: 1px; width: 0; background: var(--text-3); transition: width 1s linear; }\n\n.aviso { margin-top: 16px; padding: 10px 14px; border-radius: var(--r); font-size: 12.5px; border: 1px solid var(--line-2); border-left: 3px solid var(--warn); background: var(--surface); }\n.aviso.error { border-left-color: var(--bad); }\n\n.seccion { margin-top: 32px; }\n.seccion-cab { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }\n.seccion-cab h2 { margin: 0; font-size: 11.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }\n.seccion-cab p { margin: 0; font-size: 12px; color: var(--text-2); }\n\n/* Indicadores */\n.indicadores { margin-top: 24px; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); }\n.ind { padding: 16px 18px 15px; border-left: 1px solid var(--line); min-width: 0; }\n.ind:first-child { border-left: 0; }\n.ind .l { font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--text-2); }\n.ind .v { font-size: clamp(22px, 1.9vw, 30px); font-weight: 600; letter-spacing: -.02em; line-height: 1.25; margin-top: 6px; white-space: nowrap; }\n.ind .n { font-size: 12px; color: var(--text-2); margin-top: 2px; }\n@media (max-width: 1100px) { .indicadores { grid-template-columns: repeat(3, minmax(0, 1fr)); } .ind:nth-child(4) { border-left: 0; } .ind:nth-child(n+4) { border-top: 1px solid var(--line); } }\n@media (max-width: 620px) { .indicadores { grid-template-columns: repeat(2, minmax(0, 1fr)); } .ind { border-top: 1px solid var(--line); } .ind:nth-child(-n+2) { border-top: 0; } .ind:nth-child(odd) { border-left: 0; } .ind:nth-child(even) { border-left: 1px solid var(--line); } }\n\n/* Tablas */\n.caja { border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); overflow: hidden; }\n.desliza { overflow-x: auto; }\ntable { width: 100%; border-collapse: collapse; }\nth { font-size: 10.5px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--text-2); text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); white-space: nowrap; background: var(--surface); }\ntd { padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; }\ntbody tr:last-child td, tfoot td { border-bottom: 0; }\ntfoot td { border-top: 1px solid var(--line-2); font-weight: 600; background: var(--raised); }\nth.num { text-align: right; }\n.t-agentes { min-width: 1120px; }\n.t-agentes th, .t-agentes td { padding-left: 9px; padding-right: 9px; }\n.t-agentes th:first-child, .t-agentes td:first-child { padding-left: 16px; }\n.t-agentes tbody tr { cursor: pointer; }\n.t-agentes tbody tr:hover td { background: var(--raised); }\n.t-agentes tbody tr.sel td { background: var(--raised); }\n.t-agentes tbody tr.sel td:first-child { box-shadow: inset 2px 0 0 var(--text); }\n.t-agentes td.fuerte { font-size: 15px; font-weight: 600; }\n.nombre { font-weight: 600; font-size: 13.5px; white-space: nowrap; }\n.est { display: inline-flex; align-items: center; gap: 7px; font-size: 11.5px; font-weight: 600; white-space: nowrap; margin-top: 3px; }\n.est i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }\n.grupo-izq { border-left: 1px solid var(--line); }\n\n/* Pestañas */\n.pestanas { display: flex; gap: 22px; padding: 0 16px; border-bottom: 1px solid var(--line); overflow-x: auto; }\n.pest { background: none; border: 0; padding: 13px 0 12px; font-size: 12.5px; font-weight: 600; color: var(--text-2); cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; }\n.pest:hover { color: var(--text); }\n.pest.sel { color: var(--text); border-bottom-color: var(--text); }\n.pest span { color: var(--text-3); font-weight: 500; margin-left: 5px; }\n.t-cola { min-width: 760px; }\n.t-cola tbody tr:hover td { background: var(--raised); }\n.espera { font-weight: 600; font-size: 13px; white-space: nowrap; }\n.barra { display: block; width: 84px; height: 2px; background: var(--line-2); margin-top: 5px; }\n.barra i { display: block; height: 2px; background: currentColor; }\n.asunto { max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n.vacio { padding: 28px 16px; text-align: center; color: var(--text-2); }\n\n.dos { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; }\n.dos > .col-a { flex: 999 1 720px; min-width: 0; }\n.dos > .col-b { flex: 1 1 380px; min-width: 0; }\n\n/* Registro */\n.registro { list-style: none; margin: 0; padding: 0; max-height: 620px; overflow-y: auto; }\n.registro li { display: grid; grid-template-columns: 48px 96px minmax(0, 1fr); gap: 10px; padding: 9px 16px; border-bottom: 1px solid var(--line); align-items: baseline; }\n.registro li:last-child { border-bottom: 0; }\n.registro time { color: var(--text-2); font-size: 12px; }\n.registro .tipo { font-size: 10.5px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; }\n.registro .txt { min-width: 0; }\n.registro .txt small { display: block; color: var(--text-2); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n\n.pie { margin-top: 28px; padding-top: 14px; border-top: 1px solid var(--line); font-size: 11.5px; color: var(--text-2); display: flex; justify-content: space-between; gap: 8px 24px; flex-wrap: wrap; }\n.cargando { color: var(--text-2); padding: 80px 0; text-align: center; }\n\n/* Diálogos */\ndialog { border: 1px solid var(--line-2); border-radius: 8px; background: var(--surface); color: var(--text); padding: 0; width: min(1120px, calc(100vw - 32px)); max-height: calc(100vh - 32px); box-shadow: 0 24px 80px rgba(0, 0, 0, .6); }\ndialog::backdrop { background: rgba(0, 0, 0, .66); }\n.dlg-cab { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--surface); z-index: 1; }\n.dlg-cab h3 { margin: 0; font-size: 15px; font-weight: 700; }\n.dlg-cab p { margin: 2px 0 0; font-size: 12px; color: var(--text-2); }\n.dlg-cuerpo { padding: 20px; }\n.filtros { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 20px 28px; }\n.campo > label, .campo > .rot { display: block; font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--text-2); margin-bottom: 8px; }\n.campo input[type=date], .campo select { height: 36px; padding: 0 10px; border-radius: var(--r); border: 1px solid var(--line-2); background: var(--bg); color-scheme: dark; width: 100%; }\n.fechas { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }\n.fechas span { display: block; font-size: 11px; color: var(--text-2); margin-bottom: 3px; }\n.checks { display: flex; flex-direction: column; gap: 2px; }\n.checks label { display: flex; align-items: center; gap: 9px; min-height: 28px; font-size: 13px; cursor: pointer; }\n.checks input { width: 15px; height: 15px; accent-color: #F2F2F3; }\n.acciones { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line); }\n.acciones .nota { font-size: 12px; color: var(--text-2); margin-left: auto; }\n.previa { margin-top: 20px; }\n.previa h4 { margin: 0 0 8px; font-size: 11.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }\n.previa table { min-width: 980px; }\n.resumen-dlg { display: flex; gap: 28px; flex-wrap: wrap; margin-bottom: 18px; }\n.resumen-dlg div b { display: block; font-size: 20px; font-weight: 600; }\n.resumen-dlg div span { font-size: 11px; color: var(--text-2); text-transform: uppercase; letter-spacing: .07em; font-weight: 600; }\n\n@media (max-width: 640px) {\n  .pagina, .cab-in { padding-left: 16px; padding-right: 16px; }\n  .marca span { display: none; }\n  .hora { text-align: left; }\n  .registro li { grid-template-columns: 44px 92px minmax(0, 1fr); padding: 9px 12px; }\n}\n</style>\n</head>\n<body>\n<header class=\"cab\">\n  <div class=\"cab-in\">\n    <div class=\"marca\"><b>Soporte</b><span>Control en vivo · Help Scout</span></div>\n    <span id=\"conexion\" class=\"estado-con tenue\"><i></i><span>Conectando</span></span>\n    <div class=\"hora\"><b id=\"reloj\">--:--:--</b><span id=\"actualizado\">Cargando</span></div>\n    <button type=\"button\" class=\"btn\" id=\"btnPausa\" aria-pressed=\"false\">Pausar</button>\n    <button type=\"button\" class=\"btn principal\" id=\"btnExportar\">Exportar métricas</button>\n  </div>\n  <div class=\"avance\"><i id=\"avance\"></i></div>\n</header>\n\n<main class=\"pagina\">\n  <div id=\"avisos\"></div>\n  <div id=\"contenido\"><div class=\"cargando\">Leyendo Help Scout. La primera carga puede tardar hasta un minuto.</div></div>\n</main>\n\n<dialog id=\"dlgExportar\" aria-labelledby=\"tituloExportar\">\n  <div class=\"dlg-cab\">\n    <div><h3 id=\"tituloExportar\">Exportar métricas</h3><p id=\"subExportar\">Datos del historial del tracker (hoja HS_Eventos).</p></div>\n    <button type=\"button\" class=\"btn chico\" data-cerrar>Cerrar</button>\n  </div>\n  <div class=\"dlg-cuerpo\">\n    <div class=\"filtros\">\n      <div class=\"campo\">\n        <label for=\"expPeriodo\">Periodo</label>\n        <select id=\"expPeriodo\">\n          <option value=\"hoy\">Hoy</option>\n          <option value=\"ayer\">Ayer</option>\n          <option value=\"semana\" selected>Esta semana</option>\n          <option value=\"semanaPasada\">Semana pasada</option>\n          <option value=\"mes\">Este mes</option>\n          <option value=\"mesPasado\">Mes pasado</option>\n          <option value=\"todo\">Todo el historial</option>\n          <option value=\"personal\">Personalizado</option>\n        </select>\n        <div class=\"fechas\">\n          <div><span>Desde</span><input type=\"date\" id=\"expDesde\" aria-label=\"Desde\"></div>\n          <div><span>Hasta</span><input type=\"date\" id=\"expHasta\" aria-label=\"Hasta\"></div>\n        </div>\n      </div>\n      <div class=\"campo\">\n        <span class=\"rot\">Agentes</span>\n        <div class=\"checks\" id=\"expAgentes\"></div>\n      </div>\n      <div class=\"campo\">\n        <span class=\"rot\">Movimientos en la hoja de detalle</span>\n        <div class=\"checks\" id=\"expTipos\">\n          <label><input type=\"checkbox\" value=\"ASIGNADO\" checked> Asignados</label>\n          <label><input type=\"checkbox\" value=\"RESPUESTA\" checked> Respuestas</label>\n          <label><input type=\"checkbox\" value=\"PRIMERA_RESPUESTA\" checked> Primeras respuestas</label>\n          <label><input type=\"checkbox\" value=\"NUEVA_CONSULTA\" checked> Nuevas consultas</label>\n          <label><input type=\"checkbox\" value=\"REASIGNADO\" checked> Re-asignados</label>\n          <label><input type=\"checkbox\" value=\"CERRADO\" checked> Cerrados</label>\n        </div>\n      </div>\n    </div>\n    <div class=\"acciones\">\n      <button type=\"button\" class=\"btn\" id=\"expVer\">Ver vista previa</button>\n      <button type=\"button\" class=\"btn principal\" id=\"expExcel\">Descargar Excel</button>\n      <select id=\"expCsvHoja\" aria-label=\"Hoja para CSV\" style=\"height:36px;padding:0 10px;border-radius:6px;border:1px solid var(--line-2);background:var(--bg);color-scheme:dark\">\n        <option value=\"agentes\">CSV · Resumen por agente</option>\n        <option value=\"dias\">CSV · Por día</option>\n        <option value=\"detalle\">CSV · Detalle de movimientos</option>\n      </select>\n      <button type=\"button\" class=\"btn\" id=\"expCsv\">Descargar CSV</button>\n      <span class=\"nota\" id=\"expEstado\" role=\"status\"></span>\n    </div>\n    <div class=\"previa\" id=\"expPrevia\"></div>\n  </div>\n</dialog>\n\n<dialog id=\"dlgDetalle\" aria-labelledby=\"tituloDetalle\">\n  <div class=\"dlg-cab\">\n    <div><h3 id=\"tituloDetalle\">Detalle</h3><p id=\"subDetalle\"></p></div>\n    <button type=\"button\" class=\"btn chico\" data-cerrar>Cerrar</button>\n  </div>\n  <div class=\"dlg-cuerpo\" id=\"cuerpoDetalle\"></div>\n</dialog>\n\n<script>\n(function () {\n  'use strict';\n  var datos = null, desfase = 0, filtro = 'todos', pausado = false, enCurso = false, ultimaOk = 0, proxima = 0, temporizador = null;\n  var demo = typeof google === 'undefined' || !google.script || !google.script.run;\n  var reporte = null;\n\n  var $ = function (id) { return document.getElementById(id); };\n  var todos = function (sel, raiz) { return Array.prototype.slice.call((raiz || document).querySelectorAll(sel)); };\n  var ahora = function () { return Date.now() + desfase; };\n  var esc = function (t) {\n    return String(t == null ? '' : t).replace(/[&<>\"']/g, function (c) {\n      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' }[c];\n    });\n  };\n  var p2 = function (n) { return (n < 10 ? '0' : '') + n; };\n  function dur(seg) {\n    seg = Math.max(0, Math.floor(seg));\n    var d = Math.floor(seg / 86400), h = Math.floor(seg % 86400 / 3600), m = Math.floor(seg % 3600 / 60), s = seg % 60;\n    if (d) return d + ' d ' + p2(h) + ':' + p2(m) + ':' + p2(s);\n    return p2(h) + ':' + p2(m) + ':' + p2(s);\n  }\n  function corto(seg) {\n    seg = Math.max(0, Math.floor(seg));\n    if (seg < 60) return seg + ' s';\n    if (seg < 3600) return Math.floor(seg / 60) + ' min';\n    if (seg < 86400) return Math.floor(seg / 3600) + ' h ' + p2(Math.floor(seg % 3600 / 60)) + ' min';\n    return Math.floor(seg / 86400) + ' d ' + Math.floor(seg % 86400 / 3600) + ' h';\n  }\n  function minTxt(m) {\n    if (m == null) return '—';\n    if (m < 60) return (Math.round(m * 10) / 10).toLocaleString('es') + ' min';\n    return Math.floor(m / 60) + ' h ' + p2(Math.round(m % 60)) + ' min';\n  }\n  function tz() { return (datos && datos.tz) || 'America/New_York'; }\n  function hora(ms, seg) {\n    var o = { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: tz() };\n    if (seg) o.second = '2-digit';\n    try { return new Date(ms).toLocaleTimeString('es', o); } catch (e) { return new Date(ms).toTimeString().slice(0, seg ? 8 : 5); }\n  }\n  function tono(min) {\n    var meta = (datos && datos.metaRespuestaMin) || 60;\n    return min < meta / 2 ? 'ok' : min < meta ? 'warn' : 'bad';\n  }\n  function servidor(fn, arg, listo) {\n    if (demo) { setTimeout(function () { listo(JSON.stringify(DEMO[fn](arg))); }, 250); return; }\n    var corre = google.script.run\n      .withSuccessHandler(listo)\n      .withFailureHandler(function (err) { listo(JSON.stringify({ ok: false, error: String(err && err.message || err) })); });\n    if (arg === undefined) corre[fn](); else corre[fn](arg);\n  }\n  function leer(texto) { try { return JSON.parse(texto); } catch (e) { return { ok: false, error: 'Respuesta no válida del servidor.' }; } }\n\n  // ---------- Datos en vivo ----------\n  function pedir() {\n    if (enCurso || pausado) return;\n    enCurso = true;\n    servidor('datosPanelEnVivo', undefined, function (texto) { enCurso = false; recibir(leer(texto)); programar(); });\n  }\n  function intervalo() {\n    if (!datos) return 10;\n    return datos.enHorario ? (datos.segundos || 5) : (datos.segundosFueraDeHorario || 60);\n  }\n  function programar() {\n    clearTimeout(temporizador);\n    if (pausado) return;\n    var s = intervalo();\n    proxima = Date.now() + s * 1000;\n    temporizador = setTimeout(pedir, s * 1000);\n  }\n  var errorActual = '';\n  function recibir(r) {\n    if (!r.ok) {\n      errorActual = r.error || 'Error desconocido';\n      pintarAvisos();\n      if (!datos) $('contenido').innerHTML = '<div class=\"cargando\">Sin datos todavía. Reintentando.</div>';\n      return;\n    }\n    errorActual = '';\n    desfase = Date.parse(r.ahora) - Date.now();\n    datos = r;\n    ultimaOk = Date.now();\n    pintarAvisos();\n    pintar();\n  }\n  function pintarAvisos() {\n    var h = '';\n    if (errorActual) {\n      h += '<div class=\"aviso error\" role=\"alert\"><b>No se pudo leer Help Scout.</b> ' + esc(errorActual) +\n        (datos ? ' Se muestran los últimos datos recibidos (' + hora(ultimaOk + desfase, true) + ').' : '') + '</div>';\n    }\n    if (datos && datos.verificacion && !datos.verificacion.ok) {\n      h += '<div class=\"aviso error\" role=\"alert\"><b>La lectura no cuadra con Help Scout.</b> ' + esc(datos.verificacion.avisos.join(' · ')) + '</div>';\n    }\n    if (datos && datos.sinVincular && datos.sinVincular.length) {\n      h += '<div class=\"aviso\">No encontré en Help Scout a: ' + esc(datos.sinVincular.join(', ')) + '. Revisa su email en la configuración (AGENTES).</div>';\n    }\n    if (demo) h += '<div class=\"aviso\">Vista de demostración con datos de ejemplo. Los datos reales aparecen al abrir la página publicada desde Apps Script.</div>';\n    $('avisos').innerHTML = h;\n  }\n\n  // ---------- Pintado ----------\n  function reloj(desde, clases, extra) {\n    return '<span class=\"reloj ' + (clases || '') + '\" data-desde=\"' + esc(desde) + '\"' + (extra || '') + '>' + dur((ahora() - Date.parse(desde)) / 1000) + '</span>';\n  }\n  function ind(l, v, n) { return '<div class=\"ind\"><div class=\"l\">' + esc(l) + '</div><div class=\"v\">' + v + '</div><div class=\"n\">' + esc(n) + '</div></div>'; }\n\n  function pintar() {\n    var p = datos.panel, e = p.equipo, viejo = null;\n    p.agentes.forEach(function (a) { if (a.esperando.length && (!viejo || a.esperando[0].esperaDesde < viejo)) viejo = a.esperando[0].esperaDesde; });\n    var h = '';\n    h += '<section class=\"indicadores\" aria-label=\"Indicadores del equipo\">' +\n      ind('Clientes esperando', e.esperando, e.abiertos + ' casos abiertos · ' + e.seguimiento + ' en seguimiento') +\n      ind('Mayor espera', viejo ? reloj(viejo, '', ' data-tono=\"1\"') : '—', viejo ? 'reloj en vivo · hh:mm:ss' : 'nadie esperando') +\n      ind('Respuestas hoy', e.respuestas, 'en ' + e.casosRespondidos + ' casos') +\n      ind('Cerrados hoy', e.cerrados, e.asignados + ' asignados · ' + e.reasignados + ' re-asignados') +\n      ind('Tiempo de respuesta', minTxt(e.promedioRespuestaMin), 'promedio · mediana ' + minTxt(e.medianaRespuestaMin)) +\n      ind('Sin asignar', p.sinAsignar.length, p.sinAsignar.length ? 'con el cliente esperando' : 'cola vacía') +\n      '</section>';\n\n    h += '<section class=\"seccion\"><div class=\"seccion-cab\"><h2>Agentes</h2><p>Jornada del ' + esc(diaLargo(datos.hoy)) +\n      ' · clic en una fila para filtrar la cola</p></div><div class=\"caja\"><div class=\"desliza\"><table class=\"t-agentes\">' +\n      '<thead><tr><th>Agente</th><th class=\"num grupo-izq\">Esperando</th><th class=\"num\">Mayor espera</th><th class=\"num\">Seguimiento</th><th class=\"num\">Abiertos</th>' +\n      '<th class=\"num grupo-izq\">Asignados</th><th class=\"num\">Respuestas</th><th class=\"num\">Casos</th><th class=\"num\">Cerrados</th><th class=\"num\">Re-asig.</th>' +\n      '<th class=\"num grupo-izq\">T. respuesta</th><th class=\"num\">1ª respuesta</th><th class=\"num\">Últ. respuesta</th><th></th></tr></thead><tbody>' +\n      p.agentes.map(filaAgente).join('') + '</tbody><tfoot><tr><td>Equipo</td>' +\n      '<td class=\"num grupo-izq\">' + e.esperando + '</td><td class=\"num\">' + (viejo ? reloj(viejo, '', ' data-tono=\"1\"') : '—') + '</td><td class=\"num\">' + e.seguimiento + '</td><td class=\"num\">' + e.abiertos + '</td>' +\n      '<td class=\"num grupo-izq\">' + e.asignados + '</td><td class=\"num\">' + e.respuestas + '</td><td class=\"num\">' + e.casosRespondidos + '</td><td class=\"num\">' + e.cerrados + '</td><td class=\"num\">' + e.reasignados + '</td>' +\n      '<td class=\"num grupo-izq\">' + minTxt(e.promedioRespuestaMin) + '</td><td class=\"num\">' + minTxt(e.promedioPrimeraMin) + '</td><td></td><td></td></tr></tfoot></table></div></div></section>';\n\n    h += '<section class=\"seccion dos\"><div class=\"col-a\"><div class=\"seccion-cab\"><h2>Clientes esperando respuesta</h2><p>Del que más espera al más reciente · meta ' +\n      datos.metaRespuestaMin + ' min</p></div><div class=\"caja\" id=\"cola\"></div></div>' +\n      '<div class=\"col-b\"><div class=\"seccion-cab\"><h2>Registro de actividad</h2><p>Últimos ' + p.feed.length + ' movimientos</p></div><div class=\"caja\">' + registro(p.feed) + '</div></div></section>';\n\n    var v = datos.verificacion;\n    h += '<footer class=\"pie\"><span>Horario ' + datos.horario.inicio + ':00–' + datos.horario.fin + ':00 (' + esc(tz()) + ') · tiempos de respuesta en horario laboral · relojes de espera en tiempo real</span>' +\n      '<span>' + (v ? (v.ok ? 'Verificado con Help Scout ' : 'Lectura con diferencias ') + hora(Date.parse(v.hora), true) + ' · ' + v.casosAbiertos + ' casos abiertos · ' + v.casosDelDia + ' casos con movimiento' : '') + '</span></footer>';\n\n    $('contenido').innerHTML = h;\n    todos('.t-agentes tbody tr[data-id]').forEach(function (tr) {\n      tr.addEventListener('click', function (ev) {\n        if (ev.target.closest('button')) return;\n        var id = tr.getAttribute('data-id');\n        filtro = filtro === id ? 'todos' : id;\n        marcar(); pintarCola();\n      });\n    });\n    todos('[data-detalle]').forEach(function (b) { b.addEventListener('click', function () { abrirDetalle(b.getAttribute('data-detalle'), b.getAttribute('data-nombre')); }); });\n    marcar();\n    pintarCola();\n    tic();\n  }\n\n  function filaAgente(a) {\n    if (!a.vinculado || !a.hoy) {\n      return '<tr><td class=\"nombre\">' + esc(a.nombre) + '</td><td colspan=\"13\" class=\"tenue\">No está vinculada con un usuario de Help Scout</td></tr>';\n    }\n    var h = a.hoy, viejo = a.esperando.length ? a.esperando[0].esperaDesde : null;\n    return '<tr data-id=\"' + a.id + '\">' +\n      '<td><div class=\"nombre\">' + esc(a.nombre) + '</div>' +\n      '<span class=\"est tenue\" data-ultima=\"' + esc(h.ultimaRespuesta || '') + '\" data-esperando=\"' + a.esperando.length + '\"><i></i><span>—</span></span></td>' +\n      '<td class=\"num fuerte grupo-izq\">' + a.esperando.length + '</td>' +\n      '<td class=\"num\">' + (viejo ? reloj(viejo, '', ' data-tono=\"1\"') : '<span class=\"tenue\">—</span>') + '</td>' +\n      '<td class=\"num\">' + a.seguimiento + '</td><td class=\"num\">' + a.abiertos + '</td>' +\n      '<td class=\"num grupo-izq\">' + h.asignados + '</td><td class=\"num\">' + h.respuestas + '</td><td class=\"num\">' + h.casosRespondidos + '</td><td class=\"num\">' + h.cerrados + '</td><td class=\"num\">' + h.reasignados + '</td>' +\n      '<td class=\"num grupo-izq\">' + minTxt(h.promedioRespuestaMin) + '</td><td class=\"num\">' + minTxt(h.promedioPrimeraMin) + '</td>' +\n      '<td class=\"num\">' + (h.ultimaRespuesta ? 'hace <span class=\"reloj\" data-desde=\"' + esc(h.ultimaRespuesta) + '\" data-corto=\"1\">' + corto((ahora() - Date.parse(h.ultimaRespuesta)) / 1000) + '</span>' : '<span class=\"tenue\">sin respuestas hoy</span>') + '</td>' +\n      '<td class=\"num\"><button type=\"button\" class=\"btn chico\" data-detalle=\"' + a.id + '\" data-nombre=\"' + esc(a.nombre) + '\">Detalle</button></td></tr>';\n  }\n  function marcar() {\n    todos('.t-agentes tbody tr[data-id]').forEach(function (tr) { tr.classList.toggle('sel', tr.getAttribute('data-id') === String(filtro)); });\n  }\n\n  function pintarCola() {\n    var p = datos.panel, filas = [];\n    p.agentes.forEach(function (a) { a.esperando.forEach(function (t) { filas.push(t); }); });\n    p.sinAsignar.forEach(function (t) { filas.push(t); });\n    var pest = [{ id: 'todos', t: 'Todos', n: filas.length }]\n      .concat(p.agentes.filter(function (a) { return a.vinculado; }).map(function (a) { return { id: String(a.id), t: a.nombre, n: a.esperando.length }; }))\n      .concat([{ id: 'sin', t: 'Sin asignar', n: p.sinAsignar.length }]);\n    if (!pest.some(function (x) { return x.id === String(filtro); })) filtro = 'todos';\n    var visibles = filas.filter(function (t) {\n      return filtro === 'todos' || (filtro === 'sin' ? !t.agenteId : String(t.agenteId) === String(filtro));\n    }).sort(function (x, y) { return x.esperaDesde < y.esperaDesde ? -1 : x.esperaDesde > y.esperaDesde ? 1 : 0; });\n    var h = '<div class=\"pestanas\" role=\"tablist\">' + pest.map(function (x) {\n      var sel = String(filtro) === x.id;\n      return '<button type=\"button\" role=\"tab\" aria-selected=\"' + sel + '\" class=\"pest' + (sel ? ' sel' : '') + '\" data-f=\"' + x.id + '\">' + esc(x.t) + '<span>' + x.n + '</span></button>';\n    }).join('') + '</div>';\n    if (!visibles.length) {\n      h += '<div class=\"vacio\">Ningún cliente está esperando respuesta.</div>';\n    } else {\n      h += '<div class=\"desliza\"><table class=\"t-cola\"><thead><tr><th>Espera</th><th>Caso</th><th>Asunto</th><th>Cliente</th><th>Agente</th><th>Estado en Help Scout</th></tr></thead><tbody>' +\n        visibles.map(function (t) {\n          return '<tr><td>' + reloj(t.esperaDesde, 'espera', ' data-tono=\"1\" data-barra=\"1\"') + '<span class=\"barra\"><i></i></span></td>' +\n            '<td><a href=\"' + esc(t.url) + '\" target=\"_blank\" rel=\"noopener\"><b>#' + esc(t.numero) + '</b></a></td>' +\n            '<td class=\"asunto\" title=\"' + esc(t.asunto) + '\">' + esc(t.asunto) + '</td>' +\n            '<td class=\"tenue\">' + esc(t.cliente || '—') + '</td>' +\n            '<td>' + (t.agenteId ? esc(t.agente) : '<span class=\"bad\">Sin asignar</span>') + '</td>' +\n            '<td class=\"tenue\">' + (t.estado === 'pending' ? 'Pending' : 'Active') + (t.buzon ? ' · ' + esc(t.buzon) : '') + '</td></tr>';\n        }).join('') + '</tbody></table></div>';\n    }\n    $('cola').innerHTML = h;\n    todos('.pest').forEach(function (b) { b.addEventListener('click', function () { filtro = b.getAttribute('data-f'); marcar(); pintarCola(); }); });\n    tic();\n  }\n\n  var TIPOS = {\n    RESPUESTA: ['Respuesta', 'ok'], CLIENTE: ['Cliente', 'warn'], ASIGNADO: ['Asignado', ''], CERRADO: ['Cerrado', 'ok'],\n    REASIGNADO: ['Re-asignado', 'tenue'], NUEVA_CONSULTA: ['Consulta', 'warn'], PRIMERA_RESPUESTA: ['1ª respuesta', 'ok'],\n  };\n  function textoMovimiento(f) {\n    var caso = '<a href=\"' + esc(f.url) + '\" target=\"_blank\" rel=\"noopener\"><b>#' + esc(f.numero) + '</b></a>';\n    var ag = esc(f.agente || '');\n    if (f.tipo === 'RESPUESTA') return ag + ' respondió ' + caso + (f.minutos != null ? ' <span class=\"tenue\">en ' + minTxt(f.minutos) + '</span>' : '');\n    if (f.tipo === 'CLIENTE') return 'El cliente escribió en ' + caso + (ag ? ' <span class=\"tenue\">· ' + ag + '</span>' : ' <span class=\"bad\">· sin asignar</span>');\n    if (f.tipo === 'ASIGNADO') return caso + ' asignado a ' + ag;\n    if (f.tipo === 'CERRADO') return ag + ' cerró ' + caso;\n    if (f.tipo === 'REASIGNADO') return ag + ' re-asignó ' + caso;\n    if (f.tipo === 'NUEVA_CONSULTA') return 'Nueva consulta en ' + caso + ' <span class=\"tenue\">· ' + ag + '</span>';\n    return ag + ' ' + caso;\n  }\n  function registro(items) {\n    if (!items.length) return '<div class=\"vacio\">Todavía no hay movimientos en esta jornada.</div>';\n    return '<ol class=\"registro\">' + items.map(function (f) {\n      var t = TIPOS[f.tipo] || [f.tipo, ''];\n      return '<li><time>' + esc(hora(Date.parse(f.fecha), false)) + '</time><span class=\"tipo ' + t[1] + '\">' + esc(t[0]) + '</span>' +\n        '<span class=\"txt\">' + textoMovimiento(f) + '<small>' + esc(f.asunto || '') + '</small></span></li>';\n    }).join('') + '</ol>';\n  }\n  function diaLargo(d) {\n    try { return new Date(d + 'T12:00:00Z').toLocaleDateString('es', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' }); } catch (e) { return d; }\n  }\n\n  // ---------- Cada segundo ----------\n  function conexion(clase, texto) {\n    var el = $('conexion');\n    el.className = 'estado-con ' + clase;\n    el.lastElementChild.textContent = texto;\n  }\n  function tic() {\n    var t = ahora();\n    $('reloj').textContent = hora(t, true);\n    if (!datos) { if (errorActual) conexion('bad', 'Sin conexión'); return; }\n    var hace = Math.max(0, Math.floor((Date.now() - ultimaOk) / 1000));\n    var atrasado = hace > Math.max(30, intervalo() * 4);\n    $('actualizado').textContent = pausado ? 'En pausa · datos de hace ' + corto(hace)\n      : 'Actualizado hace ' + corto(hace) + ' · cada ' + intervalo() + ' s';\n    if (pausado) conexion('warn', 'En pausa');\n    else if (errorActual || atrasado) conexion('bad', 'Sin conexión');\n    else if (!datos.enHorario) conexion('tenue', 'Fuera de horario');\n    else conexion('ok', 'En vivo');\n    $('avance').style.width = pausado ? '0' : Math.min(100, Math.max(0, 100 - (proxima - Date.now()) / (intervalo() * 1000) * 100)) + '%';\n\n    var meta = datos.metaRespuestaMin || 60;\n    todos('.reloj[data-desde]').forEach(function (el) {\n      var seg = (t - Date.parse(el.getAttribute('data-desde'))) / 1000;\n      el.textContent = el.getAttribute('data-corto') ? corto(seg) : dur(seg);\n      if (el.getAttribute('data-tono')) {\n        var c = tono(seg / 60);\n        el.classList.remove('ok', 'warn', 'bad');\n        el.classList.add(c);\n        if (el.getAttribute('data-barra')) {\n          var b = el.parentNode.querySelector('.barra');\n          b.className = 'barra ' + c;\n          b.firstChild.style.width = Math.min(100, seg / 60 / meta * 100) + '%';\n        }\n      }\n    });\n    var alerta = datos.alertaSinResponderMin || [10, 30];\n    todos('.est[data-esperando]').forEach(function (el) {\n      var esperando = Number(el.getAttribute('data-esperando')), ultima = el.getAttribute('data-ultima');\n      var min = ultima ? (t - Date.parse(ultima)) / 60000 : Infinity, clase, texto;\n      if (!esperando) { clase = 'ok'; texto = 'Al día'; }\n      else if (!datos.enHorario) { clase = 'tenue'; texto = 'Fuera de horario'; }\n      else if (min < alerta[0]) { clase = 'ok'; texto = 'Respondiendo'; }\n      else if (min < alerta[1]) { clase = 'warn'; texto = 'Sin responder ' + Math.floor(min) + ' min'; }\n      else { clase = 'bad'; texto = ultima ? 'Sin responder ' + corto(min * 60) : 'Sin responder hoy'; }\n      el.className = 'est ' + clase;\n      el.lastElementChild.textContent = texto;\n    });\n  }\n\n  // ---------- Detalle de una agente ----------\n  function abrirDetalle(id, nombre) {\n    $('tituloDetalle').textContent = nombre;\n    $('subDetalle').textContent = 'Cada cifra de la tabla sale de estas listas.';\n    $('cuerpoDetalle').innerHTML = '<div class=\"vacio\">Cargando.</div>';\n    $('dlgDetalle').showModal();\n    servidor('detalleAgentePanel', id, function (texto) {\n      var d = leer(texto);\n      if (!d.ok) { $('cuerpoDetalle').innerHTML = '<div class=\"aviso error\">' + esc(d.error) + '</div>'; return; }\n      var cuenta = function (tipo) { return d.movimientos.filter(function (m) { return m.tipo === tipo; }).length; };\n      var unicos = function (tipo) { var s = {}; d.movimientos.forEach(function (m) { if (m.tipo === tipo) s[m.numero] = 1; }); return Object.keys(s).length; };\n      var esperando = d.abiertos.filter(function (x) { return x.esperaDesde; }).length;\n      var h = '<div class=\"resumen-dlg\">' +\n        '<div><b>' + esperando + '</b><span>Esperando</span></div><div><b>' + (d.abiertos.length - esperando) + '</b><span>En seguimiento</span></div>' +\n        '<div><b>' + unicos('ASIGNADO') + '</b><span>Asignados</span></div><div><b>' + cuenta('RESPUESTA') + '</b><span>Respuestas</span></div>' +\n        '<div><b>' + unicos('CERRADO') + '</b><span>Cerrados</span></div><div><b>' + unicos('REASIGNADO') + '</b><span>Re-asignados</span></div></div>';\n      h += '<div class=\"previa\"><h4>Casos abiertos (' + d.abiertos.length + ')</h4><div class=\"caja\"><div class=\"desliza\"><table><thead><tr><th>Caso</th><th>Asunto</th><th>Cliente</th><th>Estado</th><th>Cliente espera desde</th></tr></thead><tbody>' +\n        (d.abiertos.map(function (x) {\n          return '<tr><td><a href=\"' + esc(x.url) + '\" target=\"_blank\" rel=\"noopener\"><b>#' + esc(x.numero) + '</b></a></td><td class=\"asunto\">' + esc(x.asunto) + '</td><td class=\"tenue\">' + esc(x.cliente) +\n            '</td><td class=\"tenue\">' + (x.estado === 'pending' ? 'Pending' : 'Active') + '</td><td>' + (x.esperaDesde ? esc(hora(Date.parse(x.esperaDesde), true)) + ' · ' + corto((ahora() - Date.parse(x.esperaDesde)) / 1000) : '<span class=\"tenue\">respondido, en seguimiento</span>') + '</td></tr>';\n        }).join('') || '<tr><td colspan=\"5\" class=\"vacio\">Sin casos abiertos.</td></tr>') + '</tbody></table></div></div></div>';\n      h += '<div class=\"previa\"><h4>Movimientos de la jornada (' + d.movimientos.length + ')</h4><div class=\"caja\"><div class=\"desliza\"><table><thead><tr><th>Hora</th><th>Movimiento</th><th>Caso</th><th>Asunto</th><th class=\"num\">Minutos laborales</th></tr></thead><tbody>' +\n        (d.movimientos.map(function (m) {\n          var t = TIPOS[m.tipo] || [m.tipo, ''];\n          return '<tr><td>' + esc(hora(Date.parse(m.fecha), true)) + '</td><td class=\"' + t[1] + '\">' + esc(t[0]) + '</td><td><a href=\"' + esc(m.url) + '\" target=\"_blank\" rel=\"noopener\"><b>#' + esc(m.numero) +\n            '</b></a></td><td class=\"asunto\">' + esc(m.asunto) + '</td><td class=\"num\">' + (m.minutos == null ? '<span class=\"tenue\">—</span>' : m.minutos) + '</td></tr>';\n        }).join('') || '<tr><td colspan=\"5\" class=\"vacio\">Sin movimientos.</td></tr>') + '</tbody></table></div></div></div>';\n      $('cuerpoDetalle').innerHTML = h;\n    });\n  }\n\n  // ---------- Exportar ----------\n  function hoyLocal() {\n    try { return new Intl.DateTimeFormat('en-CA', { timeZone: tz(), year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ahora())); }\n    catch (e) { return new Date(ahora()).toISOString().slice(0, 10); }\n  }\n  function sumarDias(d, n) { var f = new Date(d + 'T12:00:00Z'); f.setUTCDate(f.getUTCDate() + n); return f.toISOString().slice(0, 10); }\n  function rango(tipo) {\n    var hoy = hoyLocal(), f = new Date(hoy + 'T12:00:00Z'), lunes = sumarDias(hoy, -((f.getUTCDay() + 6) % 7));\n    var mes1 = hoy.slice(0, 8) + '01';\n    if (tipo === 'hoy') return [hoy, hoy];\n    if (tipo === 'ayer') return [sumarDias(hoy, -1), sumarDias(hoy, -1)];\n    if (tipo === 'semana') return [lunes, hoy];\n    if (tipo === 'semanaPasada') return [sumarDias(lunes, -7), sumarDias(lunes, -1)];\n    if (tipo === 'mes') return [mes1, hoy];\n    if (tipo === 'mesPasado') { var fin = sumarDias(mes1, -1); return [fin.slice(0, 8) + '01', fin]; }\n    if (tipo === 'todo') return [(datos && datos.fechaInicio) || '2026-01-01', hoy];\n    return null;\n  }\n  function aplicarPeriodo() {\n    var r = rango($('expPeriodo').value);\n    if (r) { $('expDesde').value = r[0]; $('expHasta').value = r[1]; }\n  }\n  function filtrosExportar() {\n    return {\n      desde: $('expDesde').value, hasta: $('expHasta').value,\n      agentes: todos('#expAgentes input:checked').map(function (i) { return i.value; }),\n      tipos: todos('#expTipos input:checked').map(function (i) { return i.value; }),\n    };\n  }\n  function abrirExportar() {\n    var nombres = (datos && datos.agentes) || [];\n    if (!$('expAgentes').children.length) {\n      $('expAgentes').innerHTML = nombres.map(function (n) { return '<label><input type=\"checkbox\" value=\"' + esc(n) + '\" checked> ' + esc(n) + '</label>'; }).join('');\n      if (datos && datos.fechaInicio) { $('expDesde').min = datos.fechaInicio; $('expHasta').min = datos.fechaInicio; }\n      aplicarPeriodo();\n    }\n    $('expPrevia').innerHTML = '';\n    $('expEstado').textContent = '';\n    reporte = null;\n    $('dlgExportar').showModal();\n  }\n  function pedirReporte(despues) {\n    var f = filtrosExportar();\n    if (!f.desde || !f.hasta || f.desde > f.hasta) { $('expEstado').textContent = 'Revisa las fechas.'; return; }\n    if (!f.agentes.length) { $('expEstado').textContent = 'Elige al menos una agente.'; return; }\n    $('expEstado').textContent = 'Calculando.';\n    ['expVer', 'expExcel', 'expCsv'].forEach(function (id) { $(id).disabled = true; });\n    servidor('reporteMetricas', f, function (texto) {\n      ['expVer', 'expExcel', 'expCsv'].forEach(function (id) { $(id).disabled = false; });\n      var r = leer(texto);\n      if (!r.ok) { $('expEstado').textContent = ''; $('expPrevia').innerHTML = '<div class=\"aviso error\">' + esc(r.error) + '</div>'; return; }\n      reporte = r;\n      $('expEstado').textContent = r.porDia.length + ' filas por día · ' + r.detalle.length + ' movimientos';\n      pintarPrevia();\n      if (despues) despues();\n    });\n  }\n  var pct = function (v) { return v == null ? '—' : Math.round(v * 100) + '%'; };\n  var nv = function (v) { return v == null ? '—' : v.toLocaleString('es'); };\n  function pintarPrevia() {\n    var r = reporte;\n    var h = '';\n    if (r.sincronizacionIncompleta) h += '<div class=\"aviso\">La sincronización con Help Scout todavía está leyendo el historial: las cifras pueden estar incompletas.</div>';\n    h += '<div class=\"previa\"><h4>Resumen por agente · ' + esc(r.filtros.desde) + ' a ' + esc(r.filtros.hasta) + '</h4><div class=\"caja\"><div class=\"desliza\"><table><thead><tr>' +\n      '<th>Agente</th><th class=\"num\">Días</th><th class=\"num\">Asignados</th><th class=\"num\">Nuevas cons.</th><th class=\"num\">Re-asig.</th><th class=\"num\">Total</th><th class=\"num\">Cerrados</th><th class=\"num\">% Resol.</th>' +\n      '<th class=\"num\">Respuestas</th><th class=\"num\">T. resp. prom.</th><th class=\"num\">Mediana</th><th class=\"num\">% en meta</th><th class=\"num\">1ª resp.</th><th class=\"num\">Resolución</th></tr></thead><tbody>' +\n      r.porAgente.slice(0, -1).map(filaPrevia).join('') + '</tbody><tfoot>' + filaPrevia(r.porAgente[r.porAgente.length - 1]) + '</tfoot></table></div></div>' +\n      '<p class=\"tenue\" style=\"margin:10px 0 0;font-size:12px\">Sincronizado con Help Scout: ' + esc(r.ultimaSincronizacion || 'nunca') +\n      ' · historial desde ' + esc(r.fechaInicio) + '. El archivo incluye además el detalle por día, cada movimiento con su enlace y las definiciones.</p></div>';\n    $('expPrevia').innerHTML = h;\n  }\n  function filaPrevia(a) {\n    return '<tr><td class=\"nombre\">' + esc(a.agente === 'EQUIPO' ? 'Equipo' : a.agente) + '</td><td class=\"num\">' + a.dias + '</td><td class=\"num\">' + a.asignados + '</td><td class=\"num\">' + a.nuevaConsulta +\n      '</td><td class=\"num\">' + a.reasignados + '</td><td class=\"num\">' + a.total + '</td><td class=\"num\">' + a.cerrados + '</td><td class=\"num\">' + pct(a.pctResolucion) + '</td><td class=\"num\">' + a.respuestas +\n      '</td><td class=\"num\">' + minTxt(a.respuestaPromMin) + '</td><td class=\"num\">' + minTxt(a.respuestaMedianaMin) + '</td><td class=\"num\">' + pct(a.respuestaEnMeta) + '</td><td class=\"num\">' + minTxt(a.primeraPromMin) +\n      '</td><td class=\"num\">' + (a.resolucionPromH == null ? '—' : nv(a.resolucionPromH) + ' h') + '</td></tr>';\n  }\n\n  var NOMBRE_TIPO = { ASIGNADO: 'Asignado', RESPUESTA: 'Respuesta', PRIMERA_RESPUESTA: 'Primera respuesta', NUEVA_CONSULTA: 'Nueva consulta', REASIGNADO: 'Re-asignado', CERRADO: 'Cerrado' };\n  function hojas() {\n    var r = reporte, c = r.config, v = function (x) { return x == null ? '' : x; };\n    var agentes = [['Agente', 'Días con actividad', 'Sin atender al iniciar (suma diaria)', 'Asignados', 'Nuevas consultas', 'Re-asignados', 'Total gestionados (suma diaria)', 'Cerrados', '% Resolución',\n      'Días en verde', 'Días en amarillo', 'Días en rojo', 'Respuestas enviadas', 'Casos respondidos', 'Respuestas por día', 'Respuestas con tiempo medido', 'T. respuesta promedio (min)',\n      'T. respuesta mediana (min)', 'T. respuesta P90 (min)', 'T. respuesta máximo (min)', '% respuestas dentro de la meta', 'Primeras respuestas medidas', '1ª respuesta promedio (min)',\n      '1ª respuesta mediana (min)', '1ª respuesta P90 (min)', 'Cierres medidos', 'Resolución promedio (h)', 'Resolución mediana (h)', 'Resolución P90 (h)', '% resueltos dentro de la meta']]\n      .concat(r.porAgente.map(function (a) {\n        return [a.agente, a.dias, a.sinAtender, a.asignados, a.nuevaConsulta, a.reasignados, a.total, a.cerrados, v(a.pctResolucion), a.verde, a.amarillo, a.rojo, a.respuestas, a.casosRespondidos,\n          v(a.respuestasPorDia), a.respuestasMedidas, v(a.respuestaPromMin), v(a.respuestaMedianaMin), v(a.respuestaP90Min), v(a.respuestaMaxMin), v(a.respuestaEnMeta), a.primerasMedidas,\n          v(a.primeraPromMin), v(a.primeraMedianaMin), v(a.primeraP90Min), a.resolucionesMedidas, v(a.resolucionPromH), v(a.resolucionMedianaH), v(a.resolucionP90H), v(a.resolucionEnMeta)];\n      }));\n    var dias = [['Día de jornada', 'Agente', 'Sin atender al iniciar', 'Asignados', 'Nuevas consultas', 'Re-asignados', 'Total gestionados', 'Cerrados', 'Pendientes', '% Resolución', 'Semáforo',\n      'Respuestas enviadas', 'Casos respondidos', 'T. respuesta promedio (min)', 'T. respuesta mediana (min)', '% respuestas dentro de la meta', '1ª respuesta promedio (min)', 'Resolución promedio (h)']]\n      .concat(r.porDia.map(function (d) {\n        return [d.dia, d.agente, d.sinAtender, d.asignados, d.nuevaConsulta, d.reasignados, d.total, d.cerrados, d.pendientes, v(d.pctResolucion), v(d.semaforo), d.respuestas, d.casosRespondidos,\n          v(d.respuestaPromMin), v(d.respuestaMedianaMin), v(d.respuestaEnMeta), v(d.primeraPromMin), v(d.resolucionPromH)];\n      }));\n    var detalle = [['Día de jornada', 'Fecha y hora', 'Movimiento', 'Agente', '# Caso', 'Asunto', 'Minutos laborales', 'Enlace']]\n      .concat(r.detalle.map(function (e) { return [e.dia, e.fecha, NOMBRE_TIPO[e.tipo] || e.tipo, e.agente, e.numero, e.asunto, v(e.minutos), e.enlace]; }));\n    var notas = [['Métricas de soporte — Help Scout'], [],\n      ['Periodo', r.filtros.desde + ' a ' + r.filtros.hasta], ['Agentes', r.filtros.agentes.join(', ')],\n      ['Movimientos en el detalle', r.filtros.tipos ? r.filtros.tipos.map(function (t) { return NOMBRE_TIPO[t] || t; }).join(', ') : 'Todos'],\n      ['Generado', r.generado + ' (' + c.zonaHoraria + ')'], ['Última sincronización con Help Scout', r.ultimaSincronizacion || 'nunca'],\n      ['Historial disponible desde', r.fechaInicio], [],\n      ['Definiciones'],\n      ['Día de jornada', 'Lo que pasa después de las ' + c.horario.fin + ':00 o en un día no laboral cuenta para el siguiente día laboral.'],\n      ['Asignados', 'Casos que quedaron asignados al agente ese día. Cada caso cuenta una vez por día.'],\n      ['Nuevas consultas', 'El cliente volvió a escribir en un caso que el agente tenía desde un día anterior y ya había atendido.'],\n      ['Re-asignados', 'El caso pasó del agente a otra persona, equipo o buzón.'],\n      ['Sin atender al iniciar', 'Foto de las ' + c.horario.inicio + ':00: casos que el agente traía sin atender. La suma de varios días cuenta el mismo caso cada día que siguió abierto.'],\n      ['Total gestionados', 'Sin atender al iniciar + Asignados + Nuevas consultas − Re-asignados (igual que el tracker).'],\n      ['% Resolución', 'Cerrados ÷ Total gestionados. Semáforo: verde ≥ ' + c.semaforo.verde * 100 + '%, amarillo ≥ ' + c.semaforo.amarillo * 100 + '%, rojo por debajo.'],\n      ['Respuestas enviadas', 'Cada mensaje que el agente envió al cliente (no cuentan notas internas).'],\n      ['T. respuesta', 'Minutos desde el primer mensaje del cliente que estaba sin contestar hasta la respuesta. Solo se mide cuando había un mensaje del cliente esperando. Meta: ' + c.metaRespuestaMin + ' min.'],\n      ['1ª respuesta', 'Minutos desde que el caso quedó asignado al agente hasta su primera respuesta.'],\n      ['Resolución', 'Horas desde la asignación (o reapertura) hasta el cierre. Meta: ' + c.metaResolucionHoras + ' h. Los cierres automáticos de Help Scout no cuentan.'],\n      ['Tiempos', 'Todos los tiempos cuentan solo el horario laboral (' + c.horario.inicio + ':00–' + c.horario.fin + ':00, días laborales).'],\n      ['P90', 'El 90% de los casos tardó ese tiempo o menos.'],\n      ['Respuestas de días pasados', 'Las respuestas individuales se registran desde que se instaló esta versión. Para días anteriores usa en la hoja: Help Scout → Completar historial de respuestas.']];\n    return { agentes: agentes, dias: dias, detalle: detalle, notas: notas };\n  }\n  function nombreArchivo(ext, sufijo) { return 'metricas-soporte_' + reporte.filtros.desde + '_a_' + reporte.filtros.hasta + (sufijo ? '_' + sufijo : '') + '.' + ext; }\n  function bajar(blob, nombre) {\n    var a = document.createElement('a');\n    a.href = URL.createObjectURL(blob); a.download = nombre; document.body.appendChild(a); a.click();\n    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 2000);\n  }\n  function cargarXlsx(listo) {\n    if (window.XLSX) return listo(true);\n    var s = document.createElement('script');\n    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';\n    s.onload = function () { listo(!!window.XLSX); };\n    s.onerror = function () { listo(false); };\n    document.head.appendChild(s);\n  }\n  function descargarExcel() {\n    cargarXlsx(function (ok) {\n      if (!ok) { $('expEstado').textContent = 'No se pudo cargar el generador de Excel. Usa la descarga en CSV.'; return; }\n      var h = hojas(), libro = XLSX.utils.book_new();\n      var agregar = function (nombre, filas, anchos, columnasPct) {\n        var hoja = XLSX.utils.aoa_to_sheet(filas);\n        hoja['!cols'] = filas[0].map(function (t, i) { return { wch: (anchos && anchos[i]) || Math.max(12, Math.min(34, String(t).length + 2)) }; });\n        (columnasPct || []).forEach(function (col) {\n          for (var f = 1; f < filas.length; f++) {\n            var celda = hoja[XLSX.utils.encode_cell({ r: f, c: col })];\n            if (celda && typeof celda.v === 'number') celda.z = '0%';\n          }\n        });\n        if (filas.length > 1) hoja['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: filas.length - 1, c: filas[0].length - 1 } }) };\n        XLSX.utils.book_append_sheet(libro, hoja, nombre);\n      };\n      agregar('Resumen por agente', h.agentes, { 0: 24 }, [8, 20, 29]);\n      agregar('Por día', h.dias, { 0: 14, 1: 24 }, [9, 15]);\n      agregar('Detalle', h.detalle, { 0: 14, 1: 20, 2: 18, 3: 24, 5: 48, 7: 58 });\n      var notas = XLSX.utils.aoa_to_sheet(h.notas);\n      notas['!cols'] = [{ wch: 36 }, { wch: 120 }];\n      XLSX.utils.book_append_sheet(libro, notas, 'Notas');\n      var datosBin = XLSX.write(libro, { bookType: 'xlsx', type: 'array' });\n      bajar(new Blob([datosBin], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), nombreArchivo('xlsx'));\n      $('expEstado').textContent = 'Excel descargado.';\n    });\n  }\n  function descargarCsv() {\n    var cual = $('expCsvHoja').value, filas = hojas()[cual];\n    var texto = filas.map(function (f) {\n      return f.map(function (c) { var s = String(c == null ? '' : c); return /[\",\\n;]/.test(s) ? '\"' + s.replace(/\"/g, '\"\"') + '\"' : s; }).join(',');\n    }).join('\\r\\n');\n    bajar(new Blob(['﻿' + texto], { type: 'text/csv;charset=utf-8' }), nombreArchivo('csv', cual));\n    $('expEstado').textContent = 'CSV descargado.';\n  }\n\n  // ---------- Controles ----------\n  $('btnPausa').addEventListener('click', function () {\n    pausado = !pausado;\n    this.setAttribute('aria-pressed', pausado ? 'true' : 'false');\n    this.textContent = pausado ? 'Reanudar' : 'Pausar';\n    if (pausado) clearTimeout(temporizador); else pedir();\n    tic();\n  });\n  $('btnExportar').addEventListener('click', abrirExportar);\n  $('expPeriodo').addEventListener('change', aplicarPeriodo);\n  ['expDesde', 'expHasta'].forEach(function (id) { $(id).addEventListener('change', function () { $('expPeriodo').value = 'personal'; }); });\n  $('expVer').addEventListener('click', function () { pedirReporte(); });\n  $('expExcel').addEventListener('click', function () { pedirReporte(descargarExcel); });\n  $('expCsv').addEventListener('click', function () { pedirReporte(descargarCsv); });\n  todos('[data-cerrar]').forEach(function (b) { b.addEventListener('click', function () { b.closest('dialog').close(); }); });\n  todos('dialog').forEach(function (d) { d.addEventListener('click', function (ev) { if (ev.target === d) d.close(); }); });\n  document.addEventListener('visibilitychange', function () {\n    if (!document.hidden && !pausado && Date.now() - ultimaOk > intervalo() * 1000) pedir();\n  });\n\n  // ---------- Demostración (solo al abrir el archivo fuera de Apps Script) ----------\n  var DEMO = (function () {\n    var nombres = ['Jaideth Andocilla', 'Maryelin Rios', 'Edna Escudero', 'Andrés Rodríguez'];\n    var asuntos = ['Cobro duplicado en mi tarjeta', 'Solicitud de reembolso', 'No puedo iniciar sesión', 'Necesito la factura de mi compra', 'Cambio de fecha de mi entrada', 'El código QR no funciona', 'No me llegó el acceso', 'Transferir mi entrada'];\n    var clientes = ['José Martínez', 'Ana Lucía Torres', 'Diego Herrera', 'Luis Ramírez', 'Carlos Pérez', 'Valentina Castro', 'Laura Gómez', 'Camila Ortiz'];\n    function hace(min) { return new Date(Date.now() - min * 60000).toISOString(); }\n    function t(i, min, ag, estado) {\n      return { id: 4500 + i, numero: 4500 + i, asunto: asuntos[i % 8], cliente: clientes[i % 8], estado: estado || 'active', esperaDesde: hace(min), agenteId: ag ? ag : null, agente: ag ? nombres[ag - 1] : '', buzon: 'Soporte', url: '#' };\n    }\n    function hoy(r, c, a, re, pr, p1, ult) { return { respuestas: r, casosRespondidos: Math.round(r * .7), asignados: a, cerrados: c, reasignados: re, nuevasConsultas: 2, tiemposMedidos: r - 4, promedioRespuestaMin: pr, medianaRespuestaMin: pr - 2, promedioPrimeraMin: p1, ultimaRespuesta: hace(ult) }; }\n    function ag(id, esp, seg, h) { return { id: id, nombre: nombres[id - 1], vinculado: true, esperando: esp, seguimiento: seg, abiertos: esp.length + seg, activos: esp.length, pendientes: seg, hoy: h }; }\n    return {\n      datosPanelEnVivo: function () {\n        return {\n          ok: true, ahora: new Date().toISOString(), hoy: new Date().toISOString().slice(0, 10), tz: 'America/New_York', enHorario: true, horario: { inicio: 9, fin: 17 },\n          segundos: 5, segundosFueraDeHorario: 60, metaRespuestaMin: 60, alertaSinResponderMin: [10, 30], ultimaRecargaCompleta: hace(3), sinVincular: [],\n          verificacion: { hora: hace(3), ok: true, casosAbiertos: 15, casosDelDia: 96, avisos: [] }, agentes: nombres, fechaInicio: '2026-10-01', metaResolucionHoras: 8,\n          panel: {\n            agentes: [ag(1, [t(18, 41, 1), t(12, 12, 1)], 2, hoy(38, 17, 21, 2, 12.4, 9, 2)), ag(2, [t(1, 96, 2), t(9, 67, 2, 'pending'), t(20, 38, 2)], 1, hoy(19, 8, 18, 1, 43, 31, 34)),\n              ag(3, [t(32, 18, 3)], 3, hoy(44, 22, 23, 3, 8.2, 6, 1)), ag(4, [t(3, 54, 4), t(24, 27, 4)], 1, hoy(27, 11, 16, 4, 22, 15, 13))],\n            sinAsignar: [t(40, 7, 0), t(42, 1, 0)],\n            equipo: { esperando: 8, seguimiento: 7, abiertos: 15, respuestas: 128, casosRespondidos: 90, asignados: 78, cerrados: 58, reasignados: 10, nuevasConsultas: 8, tiemposMedidos: 112, promedioRespuestaMin: 18.4, medianaRespuestaMin: 12, promedioPrimeraMin: 14 },\n            feed: [['RESPUESTA', 3, 21, 0.4, 6], ['CLIENTE', 0, 42, 1, null], ['RESPUESTA', 1, 31, 2, 14], ['CERRADO', 3, 17, 5, 95], ['ASIGNADO', 4, 30, 9, null], ['REASIGNADO', 4, 11, 13, null], ['NUEVA_CONSULTA', 2, 70, 20, null], ['CLIENTE', 2, 20, 38, null]]\n              .map(function (f) { return { fecha: hace(f[3]), tipo: f[0], agente: f[1] ? nombres[f[1] - 1] : '', numero: 4500 + f[2], asunto: asuntos[f[2] % 8], minutos: f[4], url: '#' }; }),\n          },\n        };\n      },\n      detalleAgentePanel: function (id) {\n        return { ok: true, agente: nombres[id - 1], abiertos: [{ numero: 4518, asunto: asuntos[2], cliente: clientes[2], estado: 'active', esperaDesde: hace(41), url: '#' }, { numero: 4531, asunto: asuntos[5], cliente: clientes[5], estado: 'pending', esperaDesde: null, url: '#' }],\n          movimientos: [['RESPUESTA', 2, 14], ['CERRADO', 9, 95], ['RESPUESTA', 12, null], ['ASIGNADO', 30, null]].map(function (m, i) { return { fecha: hace(m[1]), tipo: m[0], numero: 4520 + i, asunto: asuntos[i], minutos: m[2], url: '#' }; }) };\n      },\n      reporteMetricas: function (f) {\n        var filas = f.agentes.map(function (n, i) {\n          return { agente: n, dias: 5, sinAtender: 9 + i, asignados: 80 + i * 7, nuevaConsulta: 12, reasignados: 6, total: 95 + i * 7, cerrados: 82 + i * 5, pctResolucion: 0.86, verde: 3, amarillo: 2, rojo: 0, respuestas: 160 + i * 11, casosRespondidos: 90,\n            respuestasPorDia: 32, respuestasMedidas: 140, respuestaPromMin: 18.2 + i, respuestaMedianaMin: 12, respuestaP90Min: 55, respuestaMaxMin: 190, respuestaEnMeta: 0.91, primerasMedidas: 80, primeraPromMin: 14, primeraMedianaMin: 9, primeraP90Min: 40,\n            resolucionesMedidas: 82, resolucionPromH: 3.4, resolucionMedianaH: 2.1, resolucionP90H: 9, resolucionEnMeta: 0.88 };\n        });\n        var eq = JSON.parse(JSON.stringify(filas[0])); eq.agente = 'EQUIPO';\n        return { ok: true, filtros: { desde: f.desde, hasta: f.hasta, agentes: f.agentes, tipos: f.tipos }, porAgente: filas.concat([eq]),\n          porDia: f.agentes.map(function (n) { return { dia: f.hasta, agente: n, sinAtender: 2, asignados: 16, nuevaConsulta: 2, reasignados: 1, total: 19, cerrados: 17, pendientes: 2, pctResolucion: 0.89, semaforo: 'AMARILLO', respuestas: 31, casosRespondidos: 20, respuestaPromMin: 17, respuestaMedianaMin: 11, respuestaEnMeta: 0.93, primeraPromMin: 12, resolucionPromH: 3.1 }; }),\n          detalle: [{ dia: f.hasta, fecha: f.hasta + ' 10:02:11', tipo: 'RESPUESTA', agente: f.agentes[0], numero: 4521, asunto: asuntos[0], minutos: 12, enlace: 'https://secure.helpscout.net/conversation/1/4521' }],\n          eventosTotales: 1, generado: f.hasta + ' 16:00', ultimaSincronizacion: f.hasta + ' 15:45', sincronizacionIncompleta: false, fechaInicio: '2026-10-01',\n          config: { horario: { inicio: 9, fin: 17 }, metaRespuestaMin: 60, metaResolucionHoras: 8, semaforo: { verde: 0.9, amarillo: 0.6 }, zonaHoraria: 'America/New_York' } };\n      },\n    };\n  })();\n\n  setInterval(tic, 1000);\n  tic();\n  pedir();\n})();\n</script>\n</body>\n</html>\n";
+const PANEL_HTML = "<!DOCTYPE html>\n<html lang=\"es\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<base target=\"_top\">\n<title>Soporte · Control en vivo</title>\n<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>\n<link href=\"https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap\" rel=\"stylesheet\">\n<style>\n\n:root {\n  --bg: #0B0B0C;\n  --surface: #111113;\n  --raised: #18181B;\n  --line: #232327;\n  --line-2: #33333A;\n  --text: #F2F2F3;\n  --text-2: #A6A6AE;\n  --text-3: #85858E;\n  --ok: #5BC79A;\n  --warn: #E2B340;\n  --bad: #F2716B;\n  --r: 6px;\n}\n* { box-sizing: border-box; }\nhtml, body { margin: 0; background: var(--bg); color: var(--text); }\nbody {\n  font-family: 'Montserrat', 'Helvetica Neue', Arial, sans-serif; font-size: 13px; line-height: 1.45; font-weight: 500;\n  font-feature-settings: 'tnum' 1, 'lnum' 1; -webkit-font-smoothing: antialiased;\n}\na { color: inherit; text-decoration: none; }\na:hover { text-decoration: underline; text-underline-offset: 3px; }\nbutton, input, select { font: inherit; color: inherit; }\n:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }\n.pagina { max-width: 1680px; margin: 0 auto; padding: 0 28px 48px; }\n.num { text-align: right; white-space: nowrap; }\n.ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); } .tenue { color: var(--text-2); }\n\n/* Cabecera */\n.cab { position: sticky; top: 0; z-index: 5; background: var(--bg); border-bottom: 1px solid var(--line); }\n.cab-in { max-width: 1680px; margin: 0 auto; padding: 0 28px; min-height: 60px; display: flex; align-items: center; gap: 12px 24px; flex-wrap: wrap; }\n.marca { display: flex; align-items: baseline; gap: 12px; margin-right: auto; padding: 14px 0; }\n.marca b { font-size: 15px; font-weight: 700; letter-spacing: .01em; }\n.marca span { font-size: 13px; color: var(--text-2); padding-left: 12px; border-left: 1px solid var(--line-2); }\n.estado-con { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }\n.estado-con i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }\n.hora { text-align: right; line-height: 1.25; }\n.hora b { display: block; font-size: 17px; font-weight: 600; letter-spacing: .02em; }\n.hora span { font-size: 11.5px; color: var(--text-2); }\n.btn { height: 36px; padding: 0 14px; border-radius: var(--r); border: 1px solid var(--line-2); background: transparent; font-weight: 600; font-size: 12.5px; cursor: pointer; white-space: nowrap; }\n.btn:hover { background: var(--raised); }\n.btn.principal { background: var(--text); color: var(--bg); border-color: var(--text); }\n.btn.principal:hover { background: #D9D9DC; }\n.btn:disabled { opacity: .5; cursor: default; }\n.btn.chico { height: 28px; padding: 0 10px; font-size: 11.5px; }\n.avance { height: 1px; }\n.avance i { display: block; height: 1px; width: 0; background: var(--text-3); transition: width 1s linear; }\n\n.aviso { margin-top: 16px; padding: 10px 14px; border-radius: var(--r); font-size: 12.5px; border: 1px solid var(--line-2); border-left: 3px solid var(--warn); background: var(--surface); }\n.aviso.error { border-left-color: var(--bad); }\n\n.seccion { margin-top: 32px; }\n.seccion-cab { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }\n.seccion-cab h2 { margin: 0; font-size: 11.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }\n.seccion-cab p { margin: 0; font-size: 12px; color: var(--text-2); }\n\n/* Indicadores */\n.indicadores { margin-top: 24px; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); }\n.ind { padding: 16px 18px 15px; border-left: 1px solid var(--line); min-width: 0; }\n.ind:first-child { border-left: 0; }\n.ind .l { font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--text-2); }\n.ind .v { font-size: clamp(22px, 1.9vw, 30px); font-weight: 600; letter-spacing: -.02em; line-height: 1.25; margin-top: 6px; white-space: nowrap; }\n.ind .n { font-size: 12px; color: var(--text-2); margin-top: 2px; }\n@media (max-width: 1100px) { .indicadores { grid-template-columns: repeat(3, minmax(0, 1fr)); } .ind:nth-child(4) { border-left: 0; } .ind:nth-child(n+4) { border-top: 1px solid var(--line); } }\n@media (max-width: 620px) { .indicadores { grid-template-columns: repeat(2, minmax(0, 1fr)); } .ind { border-top: 1px solid var(--line); } .ind:nth-child(-n+2) { border-top: 0; } .ind:nth-child(odd) { border-left: 0; } .ind:nth-child(even) { border-left: 1px solid var(--line); } }\n\n/* Tablas */\n.caja { border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); overflow: hidden; }\n.desliza { overflow-x: auto; }\ntable { width: 100%; border-collapse: collapse; }\nth { font-size: 10.5px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--text-2); text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); white-space: nowrap; background: var(--surface); }\ntd { padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; }\ntbody tr:last-child td, tfoot td { border-bottom: 0; }\ntfoot td { border-top: 1px solid var(--line-2); font-weight: 600; background: var(--raised); }\nth.num { text-align: right; }\n.t-agentes { min-width: 1120px; }\n.t-agentes th, .t-agentes td { padding-left: 9px; padding-right: 9px; }\n.t-agentes th:first-child, .t-agentes td:first-child { padding-left: 16px; }\n.t-agentes tbody tr { cursor: pointer; }\n.t-agentes tbody tr:hover td { background: var(--raised); }\n.t-agentes tbody tr.sel td { background: var(--raised); }\n.t-agentes tbody tr.sel td:first-child { box-shadow: inset 2px 0 0 var(--text); }\n.t-agentes td.fuerte { font-size: 15px; font-weight: 600; }\n.nombre { font-weight: 600; font-size: 13.5px; white-space: nowrap; }\n.est { display: inline-flex; align-items: center; gap: 7px; font-size: 11.5px; font-weight: 600; white-space: nowrap; margin-top: 3px; }\n.est i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }\n.grupo-izq { border-left: 1px solid var(--line); }\n\n/* Pestañas */\n.pestanas { display: flex; gap: 22px; padding: 0 16px; border-bottom: 1px solid var(--line); overflow-x: auto; }\n.pest { background: none; border: 0; padding: 13px 0 12px; font-size: 12.5px; font-weight: 600; color: var(--text-2); cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; }\n.pest:hover { color: var(--text); }\n.pest.sel { color: var(--text); border-bottom-color: var(--text); }\n.pest span { color: var(--text-3); font-weight: 500; margin-left: 5px; }\n.t-cola { min-width: 760px; }\n.t-cola tbody tr:hover td { background: var(--raised); }\n.espera { font-weight: 600; font-size: 13px; white-space: nowrap; }\n.barra { display: block; width: 84px; height: 2px; background: var(--line-2); margin-top: 5px; }\n.barra i { display: block; height: 2px; background: currentColor; }\n.asunto { max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n.vacio { padding: 28px 16px; text-align: center; color: var(--text-2); }\n\n.dos { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; }\n.dos > .col-a { flex: 999 1 720px; min-width: 0; }\n.dos > .col-b { flex: 1 1 380px; min-width: 0; }\n\n/* Registro */\n.registro { list-style: none; margin: 0; padding: 0; max-height: 620px; overflow-y: auto; }\n.registro li { display: grid; grid-template-columns: 48px 96px minmax(0, 1fr); gap: 10px; padding: 9px 16px; border-bottom: 1px solid var(--line); align-items: baseline; }\n.registro li:last-child { border-bottom: 0; }\n.registro time { color: var(--text-2); font-size: 12px; }\n.registro .tipo { font-size: 10.5px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; }\n.registro .txt { min-width: 0; }\n.registro .txt small { display: block; color: var(--text-2); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n\n.pie { margin-top: 28px; padding-top: 14px; border-top: 1px solid var(--line); font-size: 11.5px; color: var(--text-2); display: flex; justify-content: space-between; gap: 8px 24px; flex-wrap: wrap; }\n.cargando { color: var(--text-2); padding: 80px 0; text-align: center; }\n\n/* Diálogos */\ndialog { border: 1px solid var(--line-2); border-radius: 8px; background: var(--surface); color: var(--text); padding: 0; width: min(1120px, calc(100vw - 32px)); max-height: calc(100vh - 32px); box-shadow: 0 24px 80px rgba(0, 0, 0, .6); }\ndialog::backdrop { background: rgba(0, 0, 0, .66); }\n.dlg-cab { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--surface); z-index: 1; }\n.dlg-cab h3 { margin: 0; font-size: 15px; font-weight: 700; }\n.dlg-cab p { margin: 2px 0 0; font-size: 12px; color: var(--text-2); }\n.dlg-cuerpo { padding: 20px; }\n.filtros { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 20px 28px; }\n.campo > label, .campo > .rot { display: block; font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--text-2); margin-bottom: 8px; }\n.campo input[type=date], .campo select { height: 36px; padding: 0 10px; border-radius: var(--r); border: 1px solid var(--line-2); background: var(--bg); color-scheme: dark; width: 100%; }\n.fechas { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }\n.fechas span { display: block; font-size: 11px; color: var(--text-2); margin-bottom: 3px; }\n.checks { display: flex; flex-direction: column; gap: 2px; }\n.checks label { display: flex; align-items: center; gap: 9px; min-height: 28px; font-size: 13px; cursor: pointer; }\n.checks input { width: 15px; height: 15px; accent-color: #F2F2F3; }\n.acciones { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line); }\n.acciones .nota { font-size: 12px; color: var(--text-2); margin-left: auto; }\n.previa { margin-top: 20px; }\n.previa h4 { margin: 0 0 8px; font-size: 11.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }\n.previa table { min-width: 980px; }\n.resumen-dlg { display: flex; gap: 28px; flex-wrap: wrap; margin-bottom: 18px; }\n.resumen-dlg div b { display: block; font-size: 20px; font-weight: 600; }\n.resumen-dlg div span { font-size: 11px; color: var(--text-2); text-transform: uppercase; letter-spacing: .07em; font-weight: 600; }\n\n@media (max-width: 640px) {\n  .pagina, .cab-in { padding-left: 16px; padding-right: 16px; }\n  .marca span { display: none; }\n  .hora { text-align: left; }\n  .registro li { grid-template-columns: 44px 92px minmax(0, 1fr); padding: 9px 12px; }\n}\n\n/* Encabezado agrupado de la tabla de agentes */\n.t-agentes thead tr.grupos th { font-size: 10px; color: var(--text-3); padding-top: 9px; padding-bottom: 0; border-bottom: 0; }\n.t-agentes thead tr.grupos + tr th { padding-top: 5px; }\n.fuente { font-size: 11.5px; color: var(--text-2); }\n[hidden] { display: none !important; }\n.linea-check { display: flex; align-items: center; gap: 9px; min-height: 28px; font-size: 13px; cursor: pointer; }\n.linea-check input { width: 15px; height: 15px; accent-color: #F2F2F3; }\n</style>\n</head>\n<body>\n<div id=\"app\">\n<header class=\"cab\">\n  <div class=\"cab-in\">\n    <div class=\"marca\"><b>Soporte</b><span>Control en vivo · Help Scout</span></div>\n    <span id=\"conexion\" class=\"estado-con tenue\"><i></i><span>Conectando</span></span>\n    <div class=\"hora\"><b id=\"reloj\">--:--:--</b><span id=\"actualizado\">Cargando</span></div>\n    <button type=\"button\" class=\"btn\" id=\"btnPausa\" aria-pressed=\"false\">Pausar</button>\n    <button type=\"button\" class=\"btn principal\" id=\"btnExportar\">Exportar métricas</button>\n  </div>\n  <div class=\"avance\"><i id=\"avance\"></i></div>\n</header>\n\n<main class=\"pagina\">\n  <div id=\"avisos\"></div>\n  <div id=\"contenido\"><div class=\"cargando\" id=\"progreso\">Leyendo Help Scout.</div></div>\n</main>\n</div>\n\n<dialog id=\"dlgExportar\" aria-labelledby=\"tituloExportar\">\n  <div class=\"dlg-cab\">\n    <div><h3 id=\"tituloExportar\">Exportar métricas</h3><p>Cifras de los reportes oficiales de Help Scout (las mismas de su sección Reports).</p></div>\n    <button type=\"button\" class=\"btn chico\" data-cerrar>Cerrar</button>\n  </div>\n  <div class=\"dlg-cuerpo\">\n    <div class=\"filtros\">\n      <div class=\"campo\">\n        <label for=\"expPeriodo\">Periodo</label>\n        <select id=\"expPeriodo\">\n          <option value=\"hoy\">Hoy</option>\n          <option value=\"ayer\">Ayer</option>\n          <option value=\"semana\" selected>Esta semana</option>\n          <option value=\"semanaPasada\">Semana pasada</option>\n          <option value=\"mes\">Este mes</option>\n          <option value=\"mesPasado\">Mes pasado</option>\n          <option value=\"90\">Últimos 90 días</option>\n          <option value=\"personal\">Personalizado</option>\n        </select>\n        <div class=\"fechas\">\n          <div><span>Desde</span><input type=\"date\" id=\"expDesde\" aria-label=\"Desde\"></div>\n          <div><span>Hasta</span><input type=\"date\" id=\"expHasta\" aria-label=\"Hasta\"></div>\n        </div>\n      </div>\n      <div class=\"campo\">\n        <span class=\"rot\">Agentes</span>\n        <div class=\"checks\" id=\"expAgentes\"></div>\n      </div>\n      <div class=\"campo\">\n        <span class=\"rot\">Contenido del archivo</span>\n        <div class=\"checks\">\n          <label><input type=\"checkbox\" checked disabled> Resumen por agente</label>\n          <label><input type=\"checkbox\" id=\"expSeries\" checked> Evolución por día, semana o mes</label>\n          <label><input type=\"checkbox\" id=\"expCasos\"> Lista de conversaciones con sus tiempos (más lento)</label>\n          <label><input type=\"checkbox\" id=\"expOficina\"> Tiempos solo en horario de oficina de Help Scout</label>\n        </div>\n      </div>\n    </div>\n    <div class=\"acciones\">\n      <button type=\"button\" class=\"btn\" id=\"expVer\">Ver vista previa</button>\n      <button type=\"button\" class=\"btn principal\" id=\"expExcel\">Descargar Excel</button>\n      <select id=\"expCsvHoja\" aria-label=\"Hoja para CSV\" style=\"height:36px;padding:0 10px;border-radius:6px;border:1px solid var(--line-2);background:var(--bg);color-scheme:dark\">\n        <option value=\"resumen\">CSV · Resumen por agente</option>\n        <option value=\"series\">CSV · Evolución</option>\n        <option value=\"casos\">CSV · Conversaciones</option>\n      </select>\n      <button type=\"button\" class=\"btn\" id=\"expCsv\">Descargar CSV</button>\n      <span class=\"nota\" id=\"expEstado\" role=\"status\"></span>\n    </div>\n    <div class=\"previa\" id=\"expPrevia\"></div>\n  </div>\n</dialog>\n\n<dialog id=\"dlgDetalle\" aria-labelledby=\"tituloDetalle\">\n  <div class=\"dlg-cab\">\n    <div><h3 id=\"tituloDetalle\">Detalle</h3><p id=\"subDetalle\"></p></div>\n    <button type=\"button\" class=\"btn chico\" data-cerrar>Cerrar</button>\n  </div>\n  <div class=\"dlg-cuerpo\" id=\"cuerpoDetalle\"></div>\n</dialog>\n\n<script>\n/**\n * Lógica pura del panel (la usan el servidor, el navegador y las pruebas).\n *\n * Todo sale del historial de mensajes (\"threads\") de cada conversación de Help Scout:\n *  - Cliente esperando: el caso está Active o Pending y el último mensaje es del cliente.\n *  - Reloj de espera: desde el PRIMER mensaje del cliente que sigue sin contestar.\n * Las notas internas, las asignaciones y los cambios de estado no cuentan como respuesta.\n * Las cifras del día (respuestas, resueltos, tiempos...) NO se calculan aquí: vienen de los\n * reportes oficiales de Help Scout.\n */\n(function (raiz, fabrica) {\n  if (typeof module === 'object' && module.exports) module.exports = fabrica();\n  else raiz.Logica = fabrica();\n})(typeof self !== 'undefined' ? self : this, function () {\n  'use strict';\n  var TIPOS_MENSAJE = ['message', 'chat', 'phone'];\n\n  function hilosPublicados(conv) {\n    return ((conv._embedded && conv._embedded.threads) || [])\n      .filter(function (h) { return !h.state || h.state === 'published'; })\n      .slice()\n      .sort(function (a, b) { return (new Date(a.createdAt) - new Date(b.createdAt)) || (a.id - b.id); });\n  }\n  function idUsuario(p) { return p && Number(p.id) > 0 ? Number(p.id) : null; }\n  function esDelCliente(h) { return h.type === 'customer' || (h.createdBy || {}).type === 'customer'; }\n  function esRespuesta(h) { return !esDelCliente(h) && (h.createdBy || {}).type === 'user' && TIPOS_MENSAJE.indexOf(h.type) >= 0; }\n\n  /**\n   * Conversación de Help Scout (con _embedded.threads) → resumen compacto.\n   * @param {Object} conv\n   * @param {Date|string} desdeHoy  inicio del día local: los movimientos desde ahí van en `mv`\n   * @return {{id, n, s, c, st, a, mb, w, mv}}\n   *   w  = fecha ISO desde la que espera el cliente (null si nadie espera)\n   *   mv = movimientos de hoy: [tipo, usuarioId, fechaIso]\n   *        'C' mensaje del cliente · 'R' respuesta de un usuario · 'X' cierre · 'A' asignación (usuarioId = a quién)\n   */\n  function resumirConversacion(conv, desdeHoy) {\n    var corte = new Date(desdeHoy).getTime();\n    var publicada = !conv.state || conv.state === 'published';\n    var abierta = publicada && (conv.status === 'active' || conv.status === 'pending');\n    var cliente = conv.primaryCustomer || {};\n    var nombre = [cliente.first, cliente.last].filter(Boolean).join(' ') || cliente.email || '';\n    var mv = [];\n    var desde = null, estado = null, asignado;\n\n    hilosPublicados(conv).forEach(function (h) {\n      var fecha = new Date(h.createdAt);\n      var hoy = fecha.getTime() >= corte;\n      var autor = h.createdBy || {};\n      var previo = estado;\n      if (h.status && h.status !== 'nochange') estado = h.status;\n\n      if ('assignedTo' in h) {\n        var nuevo = idUsuario(h.assignedTo);\n        if (nuevo !== null && nuevo !== asignado && hoy) mv.push(['A', nuevo, fecha.toISOString()]); // cambió de manos\n        asignado = nuevo;\n      }\n      if (esDelCliente(h)) {\n        if (!desde) desde = fecha;\n        if (hoy) mv.push(['C', 0, fecha.toISOString()]);\n        return;\n      }\n      if (esRespuesta(h)) {\n        desde = null; // le respondieron\n        if (hoy) mv.push(['R', Number(autor.id), fecha.toISOString()]);\n      }\n      if (estado === 'closed' && previo !== 'closed') {\n        desde = null; // se cerró el caso\n        if (hoy && autor.type === 'user') mv.push(['X', Number(autor.id), fecha.toISOString()]);\n      }\n    });\n\n    return {\n      id: conv.id,\n      n: conv.number,\n      s: String(conv.subject || '(sin asunto)').slice(0, 140),\n      c: String(nombre).slice(0, 60),\n      st: publicada ? conv.status : 'deleted',\n      a: idUsuario(conv.assignee),\n      mb: conv.mailboxId || null,\n      w: abierta && desde ? desde.toISOString() : null,\n      mv: mv,\n    };\n  }\n\n  /** ¿Hay que conservar esta conversación en el panel? */\n  function esRelevante(c, equipo, mostrarSinAsignar) {\n    var abierta = c.st === 'active' || c.st === 'pending';\n    if (abierta && c.a && equipo[c.a]) return true;\n    if (abierta && !c.a && mostrarSinAsignar) return true;\n    return c.mv.some(function (m) { return m[0] !== 'C' && !!equipo[m[1]]; });\n  }\n\n  var URL_CASO = 'https://secure.helpscout.net/conversation/';\n\n  /**\n   * @param {Object[]} compactos\n   * @param {{id: number, nombre: string}[]} agentes  (id null si no está vinculada en Help Scout)\n   * @param {{buzones?: Object, mostrarSinAsignar?: boolean, maxFeed?: number}} op\n   */\n  function armarPanel(compactos, agentes, op) {\n    op = op || {};\n    var equipo = {};\n    agentes.forEach(function (a) { if (a.id) equipo[a.id] = a; });\n    var nombre = function (id) { return equipo[id] ? equipo[id].nombre : ''; };\n    var ticket = function (c) {\n      return {\n        id: c.id, numero: c.n, asunto: c.s, cliente: c.c, estado: c.st, esperaDesde: c.w,\n        agenteId: c.a && equipo[c.a] ? c.a : null, agente: nombre(c.a),\n        buzon: (op.buzones && op.buzones[c.mb]) || '', url: URL_CASO + c.id + '/' + c.n,\n      };\n    };\n    var porEspera = function (x, y) { return String(x.esperaDesde || '9').localeCompare(String(y.esperaDesde || '9')); };\n\n    var abiertos = [], sinAsignar = [], feed = [], ultima = {}, respuestas = {};\n    compactos.forEach(function (c) {\n      var abierta = c.st === 'active' || c.st === 'pending';\n      var delEquipo = !!(c.a && equipo[c.a]);\n      if (abierta && delEquipo) abiertos.push(ticket(c));\n      if (abierta && !c.a && op.mostrarSinAsignar !== false && c.w) sinAsignar.push(ticket(c));\n      c.mv.forEach(function (m) {\n        var tipo = m[0], quien = m[1], fecha = m[2];\n        if (tipo === 'C') {\n          if (delEquipo || !c.a) feed.push({ fecha: fecha, tipo: 'CLIENTE', agente: delEquipo ? nombre(c.a) : '', numero: c.n, asunto: c.s, url: URL_CASO + c.id + '/' + c.n });\n          return;\n        }\n        if (!equipo[quien]) return;\n        if (tipo === 'R') {\n          respuestas[quien] = (respuestas[quien] || 0) + 1;\n          if (!ultima[quien] || fecha > ultima[quien]) ultima[quien] = fecha;\n        }\n        feed.push({ fecha: fecha, tipo: { R: 'RESPUESTA', X: 'CERRADO', A: 'ASIGNADO' }[tipo], agente: nombre(quien), numero: c.n, asunto: c.s, url: URL_CASO + c.id + '/' + c.n });\n      });\n    });\n\n    var filas = agentes.map(function (a) {\n      var suyos = abiertos.filter(function (t) { return t.agenteId === a.id; });\n      var esperando = suyos.filter(function (t) { return t.esperaDesde; }).sort(porEspera);\n      return {\n        id: a.id, nombre: a.nombre, vinculado: !!a.id,\n        esperando: esperando,\n        enSeguimiento: suyos.filter(function (t) { return !t.esperaDesde; }).sort(function (x, y) { return x.numero - y.numero; }),\n        seguimiento: suyos.length - esperando.length,\n        abiertos: suyos.length,\n        activos: suyos.filter(function (t) { return t.estado === 'active'; }).length,\n        pendientes: suyos.filter(function (t) { return t.estado === 'pending'; }).length,\n        ultimaRespuesta: ultima[a.id] || null,\n        respuestasVistas: respuestas[a.id] || 0, // conteo directo de hoy, solo para contrastar con el reporte\n      };\n    });\n    var suma = function (k) { return filas.reduce(function (s, f) { return s + (k === 'esperando' ? f.esperando.length : f[k]); }, 0); };\n    feed.sort(function (x, y) { return x.fecha < y.fecha ? 1 : x.fecha > y.fecha ? -1 : 0; });\n    return {\n      agentes: filas,\n      sinAsignar: sinAsignar.sort(porEspera),\n      equipo: { esperando: suma('esperando'), seguimiento: suma('seguimiento'), abiertos: suma('abiertos'), activos: suma('activos'), pendientes: suma('pendientes') },\n      feed: feed.slice(0, op.maxFeed || 60),\n      movimientos: feed.length,\n    };\n  }\n\n  return { resumirConversacion: resumirConversacion, esRelevante: esRelevante, armarPanel: armarPanel };\n});\n</script>\n<script>\n/* Panel en vivo: pide los datos al servidor (apiPanel), guarda el estado en el navegador y pinta la página. */\n(function () {\n  'use strict';\n  // Dentro de Apps Script existe google.script.run; fuera (al abrir el archivo suelto) se usan datos de ejemplo.\n  var GAS = typeof google !== 'undefined' && google.script && google.script.run;\n  var DEMO = !GAS;\n  var E = {\n    cfg: null, agentes: [], buzones: {}, sinVincular: [], hoy: null, inicioHoy: null, enHorario: true,\n    convs: {}, cursor: null, baseEn: 0, cargandoBase: false, verificacion: null,\n    reporte: null, reporteEn: 0, panel: null,\n  };\n  var desfase = 0, filtro = 'todos', pausado = false, enCurso = false, ultimaOk = 0, proxima = 0, temporizador = null, errorActual = '';\n  var exportacion = null;\n\n  var $ = function (id) { return document.getElementById(id); };\n  var todos = function (sel, raiz) { return Array.prototype.slice.call((raiz || document).querySelectorAll(sel)); };\n  var ahora = function () { return Date.now() + desfase; };\n  var esc = function (t) {\n    return String(t == null ? '' : t).replace(/[&<>\"']/g, function (c) {\n      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' }[c];\n    });\n  };\n  var p2 = function (n) { return (n < 10 ? '0' : '') + n; };\n  function dur(seg) {\n    seg = Math.max(0, Math.floor(seg));\n    var d = Math.floor(seg / 86400), h = Math.floor(seg % 86400 / 3600), m = Math.floor(seg % 3600 / 60), s = seg % 60;\n    return (d ? d + ' d ' : '') + p2(h) + ':' + p2(m) + ':' + p2(s);\n  }\n  function corto(seg) {\n    if (seg == null) return '—';\n    seg = Math.max(0, Math.round(seg));\n    if (seg < 60) return seg + ' s';\n    if (seg < 3600) return Math.floor(seg / 60) + ' min';\n    if (seg < 86400) return Math.floor(seg / 3600) + ' h ' + p2(Math.floor(seg % 3600 / 60)) + ' min';\n    return Math.floor(seg / 86400) + ' d ' + Math.floor(seg % 86400 / 3600) + ' h';\n  }\n  var num = function (v) { return v == null ? '—' : Number(v).toLocaleString('es', { maximumFractionDigits: 1 }); };\n  var tz = function () { return (E.cfg && E.cfg.tz) || 'America/New_York'; };\n  function hora(ms, seg) {\n    var o = { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: tz() };\n    if (seg) o.second = '2-digit';\n    try { return new Date(ms).toLocaleTimeString('es', o); } catch (e) { return new Date(ms).toTimeString().slice(0, seg ? 8 : 5); }\n  }\n  function diaLocal(ms) {\n    try { return new Intl.DateTimeFormat('en-CA', { timeZone: tz(), year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ms)); }\n    catch (e) { return new Date(ms).toISOString().slice(0, 10); }\n  }\n  function diaLargo(d) {\n    try { return new Date(d + 'T12:00:00Z').toLocaleDateString('es', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' }); } catch (e) { return d; }\n  }\n  function tono(min) {\n    var meta = (E.cfg && E.cfg.metaRespuestaMin) || 60;\n    return min < meta / 2 ? 'ok' : min < meta ? 'warn' : 'bad';\n  }\n\n  // ---------- Servidor ----------\n  function api(ruta) {\n    var llamada = DEMO ? window.DemoApi(ruta) : new Promise(function (listo) {\n      google.script.run\n        .withSuccessHandler(listo)\n        .withFailureHandler(function (err) { listo(JSON.stringify({ ok: false, error: String((err && err.message) || err) })); })\n        .apiPanel(ruta);\n    });\n    return llamada.then(function (texto) {\n      var d;\n      try { d = typeof texto === 'string' ? JSON.parse(texto) : texto; } catch (e) { d = { ok: false, error: 'Respuesta no válida del servidor.' }; }\n      if (!d.ok) throw new Error(d.error || 'Error desconocido.');\n      if (d.ahora) desfase = Date.parse(d.ahora) - Date.now();\n      return d;\n    });\n  }\n\n  // ---------- Carga completa (y verificación contra Help Scout) ----------\n  function relevante(c) {\n    var equipo = {};\n    E.agentes.forEach(function (a) { if (a.id) equipo[a.id] = a; });\n    return Logica.esRelevante(c, equipo, E.cfg.mostrarSinAsignar);\n  }\n  function progreso(texto) { var el = $('progreso'); if (el) el.textContent = texto; }\n\n  function cargarBase() {\n    E.cargandoBase = true;\n    var nuevas = {}, control = [], colaCompleta = true, inicio;\n    var guardar = function (lista) { lista.forEach(function (c) { if (relevante(c)) nuevas[c.id] = c; else delete nuevas[c.id]; }); };\n    return api('/api/equipo').then(function (eq) {\n      E.cfg = eq.config; E.agentes = eq.agentes; E.buzones = eq.buzones; E.sinVincular = eq.sinVincular;\n      E.hoy = eq.hoy; E.inicioHoy = eq.inicioHoy; E.enHorario = eq.enHorario;\n      inicio = eq.ahora;\n      var vinculadas = E.agentes.filter(function (a) { return a.id; });\n      // 1) Casos abiertos de cada agente, una por una.\n      return vinculadas.reduce(function (cadena, a) {\n        return cadena.then(function () {\n          progreso('Leyendo los casos abiertos de ' + a.nombre + '.');\n          return api('/api/abiertos?agente=' + a.id).then(function (r) {\n            guardar(r.compactos);\n            ['active', 'pending'].forEach(function (st) { control.push({ agente: a.nombre, id: a.id, estado: st, helpScout: r.totales[st].helpScout, leidos: r.totales[st].leidos }); });\n          });\n        });\n      }, Promise.resolve());\n    }).then(function () {\n      // 2) Cola sin asignar.\n      if (!E.cfg.mostrarSinAsignar) return null;\n      progreso('Leyendo la cola sin asignar.');\n      return api('/api/abiertos?agente=sin').then(function (r) { guardar(r.compactos); colaCompleta = r.completo; });\n    }).then(function () {\n      // 3) Movimientos de hoy (para el registro de actividad y la última respuesta de cada agente).\n      var leer = function (pagina, vueltas) {\n        progreso('Leyendo los movimientos de hoy (página ' + pagina + ').');\n        return api('/api/cambios?desde=' + encodeURIComponent(E.inicioHoy) + '&pagina=' + pagina).then(function (r) {\n          guardar(r.compactos);\n          return r.siguiente && vueltas < 60 ? leer(r.siguiente, vueltas + 1) : null;\n        });\n      };\n      return leer(1, 0);\n    }).then(function () {\n      E.convs = nuevas;\n      E.cursor = inicio;\n      E.baseEn = Date.now();\n      // Verificación: lo leído debe coincidir con los totales que informa Help Scout,\n      // y los abiertos del panel deben ser exactamente Active + Pending de cada agente.\n      var avisos = [];\n      control.forEach(function (c) {\n        if (c.helpScout != null && c.helpScout !== c.leidos) avisos.push(c.agente + ' (' + c.estado + '): Help Scout informa ' + c.helpScout + ' y se leyeron ' + c.leidos);\n      });\n      if (!colaCompleta) avisos.push('La cola sin asignar tiene más casos de los que se muestran');\n      E.verificacion = {\n        hora: Date.now(), ok: !avisos.length, avisos: avisos,\n        abiertos: control.reduce(function (s, c) { return s + c.leidos; }, 0), control: control,\n      };\n      E.cargandoBase = false;\n    }).catch(function (e) { E.cargandoBase = false; throw e; });\n  }\n\n  // ---------- Actualización incremental ----------\n  function cargarCambios() {\n    var desde = new Date(Date.parse(E.cursor) - 120000).toISOString(); // 2 min de solape\n    var leer = function (pagina, vueltas, cursor) {\n      return api('/api/cambios?desde=' + encodeURIComponent(desde) + '&pagina=' + pagina).then(function (r) {\n        r.compactos.forEach(function (c) { if (relevante(c)) E.convs[c.id] = c; else delete E.convs[c.id]; });\n        cursor = cursor || r.cursor;\n        return r.siguiente && vueltas < 10 ? leer(r.siguiente, vueltas + 1, cursor) : cursor;\n      });\n    };\n    return leer(1, 0, null).then(function (cursor) { E.cursor = cursor; });\n  }\n\n  function cargarReporte() {\n    return api('/api/reporte?desde=' + E.hoy + '&hasta=' + E.hoy).then(function (r) {\n      var porId = {};\n      r.filas.forEach(function (f) { porId[f.id] = f; });\n      E.reporte = { disponible: r.disponible, motivo: r.motivo, porId: porId, hora: Date.now() };\n      E.reporteEn = Date.now();\n    }).catch(function (e) {\n      E.reporte = { disponible: false, motivo: 'No se pudieron leer los reportes de Help Scout: ' + e.message, porId: {}, hora: Date.now() };\n      E.reporteEn = Date.now();\n    });\n  }\n\n  function intervalo() {\n    if (!E.cfg) return 5;\n    return E.enHorario ? E.cfg.segundos : E.cfg.segundosFueraDeHorario;\n  }\n  function ciclo() {\n    if (enCurso || pausado) return;\n    enCurso = true;\n    var cambioDeDia = E.hoy && diaLocal(ahora()) !== E.hoy;\n    var tocaBase = !E.baseEn || cambioDeDia || Date.now() - E.baseEn > E.cfg.minutosRecarga * 60000;\n    var paso = tocaBase ? cargarBase() : cargarCambios();\n    paso.then(function () {\n      if (!E.reporteEn || cambioDeDia || Date.now() - E.reporteEn > E.cfg.segundosReportes * 1000) return cargarReporte();\n    }).then(function () {\n      errorActual = ''; ultimaOk = Date.now();\n      pintar();\n    }).catch(function (e) {\n      errorActual = e.message || String(e);\n      pintarAvisos(); tic();\n    }).then(function () {\n      enCurso = false;\n      programar();\n    });\n  }\n  function programar() {\n    clearTimeout(temporizador);\n    if (pausado) return;\n    var s = errorActual ? Math.max(15, intervalo()) : intervalo();\n    proxima = Date.now() + s * 1000;\n    temporizador = setTimeout(ciclo, s * 1000);\n  }\n  function arrancar() {\n    E.baseEn = 0; E.reporteEn = 0;\n    ciclo();\n  }\n\n  // ---------- Pintado ----------\n  function pintarAvisos() {\n    var h = '';\n    if (errorActual) {\n      h += '<div class=\"aviso error\" role=\"alert\"><b>No se pudo leer Help Scout.</b> ' + esc(errorActual) +\n        (ultimaOk ? ' Se muestran los últimos datos recibidos (' + hora(ultimaOk + desfase, true) + ').' : '') + '</div>';\n    }\n    if (E.verificacion && !E.verificacion.ok) {\n      h += '<div class=\"aviso error\" role=\"alert\"><b>La lectura no cuadra con Help Scout.</b> ' + esc(E.verificacion.avisos.join(' · ')) + '</div>';\n    }\n    if (E.reporte && !E.reporte.disponible) {\n      h += '<div class=\"aviso\"><b>Sin reportes del día.</b> ' + esc(E.reporte.motivo) + ' Las columnas \"Hoy\" quedan vacías; lo que pasa en este momento sí se muestra.</div>';\n    }\n    if (E.sinVincular.length) h += '<div class=\"aviso\">No encontré en Help Scout a: ' + esc(E.sinVincular.join(', ')) + '. Revisa su email en la configuración (AGENTES).</div>';\n    if (DEMO) h += '<div class=\"aviso\">Vista de demostración con datos de ejemplo.</div>';\n    $('avisos').innerHTML = h;\n  }\n  function reloj(desde, clases, extra) {\n    return '<span class=\"reloj ' + (clases || '') + '\" data-desde=\"' + esc(desde) + '\"' + (extra || '') + '>' + dur((ahora() - Date.parse(desde)) / 1000) + '</span>';\n  }\n  function ind(l, v, n) { return '<div class=\"ind\"><div class=\"l\">' + esc(l) + '</div><div class=\"v\">' + v + '</div><div class=\"n\">' + esc(n) + '</div></div>'; }\n  function rep(id) { return (E.reporte && E.reporte.disponible && E.reporte.porId[id]) || null; }\n  function sumaRep(campo) {\n    if (!E.reporte || !E.reporte.disponible) return null;\n    return E.agentes.reduce(function (s, a) { var r = rep(a.id); return s + ((r && r[campo]) || 0); }, 0);\n  }\n\n  function pintar() {\n    pintarAvisos();\n    var p = E.panel = Logica.armarPanel(Object.keys(E.convs).map(function (k) { return E.convs[k]; }), E.agentes, { buzones: E.buzones, mostrarSinAsignar: E.cfg.mostrarSinAsignar, maxFeed: 60 });\n    var e = p.equipo, viejo = null;\n    p.agentes.forEach(function (a) { if (a.esperando.length && (!viejo || a.esperando[0].esperaDesde < viejo)) viejo = a.esperando[0].esperaDesde; });\n    var hayRep = E.reporte && E.reporte.disponible;\n    var h = '';\n    h += '<section class=\"indicadores\" aria-label=\"Indicadores del equipo\">' +\n      ind('Clientes esperando', e.esperando, 'casos asignados con el cliente esperando') +\n      ind('Mayor espera', viejo ? reloj(viejo, '', ' data-tono=\"1\"') : '—', viejo ? 'reloj en vivo · hh:mm:ss' : 'nadie esperando') +\n      ind('Casos abiertos', e.abiertos, e.activos + ' Active · ' + e.pendientes + ' Pending') +\n      ind('Respuestas hoy', hayRep ? num(sumaRep('totalReplies')) : '—', hayRep ? 'según Reports de Help Scout' : 'reporte no disponible') +\n      ind('Resueltos hoy', hayRep ? num(sumaRep('resolved')) : '—', hayRep ? num(sumaRep('closed')) + ' cerrados · según Reports' : 'reporte no disponible') +\n      ind('Sin asignar', p.sinAsignar.length, p.sinAsignar.length ? 'con el cliente esperando' : 'cola vacía') +\n      '</section>';\n\n    h += '<section class=\"seccion\"><div class=\"seccion-cab\"><h2>Agentes</h2><p>' + esc(diaLargo(E.hoy)) + ' · clic en una fila para filtrar la cola</p></div>' +\n      '<div class=\"caja\"><div class=\"desliza\"><table class=\"t-agentes\"><thead>' +\n      '<tr class=\"grupos\"><th></th><th colspan=\"4\" class=\"grupo-izq\">En este momento</th><th colspan=\"7\" class=\"grupo-izq\">Hoy · Reports de Help Scout' +\n      (hayRep ? ' · ' + hora(E.reporte.hora + desfase, false) : '') + '</th><th colspan=\"2\" class=\"grupo-izq\"></th></tr>' +\n      '<tr><th>Agente</th><th class=\"num grupo-izq\">Esperando</th><th class=\"num\">Mayor espera</th><th class=\"num\">Seguimiento</th><th class=\"num\">Abiertos</th>' +\n      '<th class=\"num grupo-izq\">Respuestas</th><th class=\"num\">Conversaciones</th><th class=\"num\">Clientes</th><th class=\"num\">Resueltos</th><th class=\"num\">Cerrados</th><th class=\"num\">T. respuesta</th><th class=\"num\">T. resolución</th>' +\n      '<th class=\"num grupo-izq\">Últ. respuesta</th><th></th></tr></thead><tbody>' + p.agentes.map(filaAgente).join('') + '</tbody><tfoot><tr><td>Equipo</td>' +\n      '<td class=\"num grupo-izq\">' + e.esperando + '</td><td class=\"num\">' + (viejo ? reloj(viejo, '', ' data-tono=\"1\"') : '—') + '</td><td class=\"num\">' + e.seguimiento + '</td><td class=\"num\">' + e.abiertos + '</td>' +\n      '<td class=\"num grupo-izq\">' + num(sumaRep('totalReplies')) + '</td><td class=\"num\">' + num(sumaRep('totalConversations')) + '</td><td class=\"num\">' + num(sumaRep('customersHelped')) + '</td><td class=\"num\">' + num(sumaRep('resolved')) + '</td><td class=\"num\">' + num(sumaRep('closed')) + '</td>' +\n      '<td class=\"num tenue\">—</td><td class=\"num tenue\">—</td><td class=\"grupo-izq\"></td><td></td></tr></tfoot></table></div></div></section>';\n\n    h += '<section class=\"seccion dos\"><div class=\"col-a\"><div class=\"seccion-cab\"><h2>Clientes esperando respuesta</h2><p>Del que más espera al más reciente · meta ' +\n      E.cfg.metaRespuestaMin + ' min</p></div><div class=\"caja\" id=\"cola\"></div></div>' +\n      '<div class=\"col-b\"><div class=\"seccion-cab\"><h2>Registro de actividad</h2><p>Hoy · ' + p.movimientos + ' movimientos</p></div><div class=\"caja\">' + registro(p.feed) + '</div></div></section>';\n\n    var v = E.verificacion;\n    h += '<footer class=\"pie\"><span>Zona horaria ' + esc(tz()) + ' · jornada ' + E.cfg.horario.inicio + ':00–' + E.cfg.horario.fin + ':00 · los relojes de espera corren en tiempo real</span>' +\n      '<span>' + (v ? (v.ok ? 'Verificado con Help Scout ' : 'Lectura con diferencias ') + hora(v.hora + desfase, true) + ' · ' + v.abiertos + ' casos abiertos leídos' : '') + '</span></footer>';\n\n    $('contenido').innerHTML = h;\n    todos('.t-agentes tbody tr[data-id]').forEach(function (tr) {\n      tr.addEventListener('click', function (ev) {\n        if (ev.target.closest('button')) return;\n        var id = tr.getAttribute('data-id');\n        filtro = filtro === id ? 'todos' : id;\n        marcar(); pintarCola();\n      });\n    });\n    todos('[data-detalle]').forEach(function (b) { b.addEventListener('click', function () { abrirDetalle(Number(b.getAttribute('data-detalle'))); }); });\n    marcar();\n    pintarCola();\n    tic();\n  }\n\n  function filaAgente(a) {\n    if (!a.vinculado) return '<tr><td class=\"nombre\">' + esc(a.nombre) + '</td><td colspan=\"13\" class=\"tenue\">No está vinculada con un usuario de Help Scout</td></tr>';\n    var r = rep(a.id) || {}, viejo = a.esperando.length ? a.esperando[0].esperaDesde : null;\n    return '<tr data-id=\"' + a.id + '\">' +\n      '<td><div class=\"nombre\">' + esc(a.nombre) + '</div><span class=\"est tenue\" data-ultima=\"' + esc(a.ultimaRespuesta || '') + '\" data-esperando=\"' + a.esperando.length + '\"><i></i><span>—</span></span></td>' +\n      '<td class=\"num fuerte grupo-izq\">' + a.esperando.length + '</td>' +\n      '<td class=\"num\">' + (viejo ? reloj(viejo, '', ' data-tono=\"1\"') : '<span class=\"tenue\">—</span>') + '</td>' +\n      '<td class=\"num\">' + a.seguimiento + '</td><td class=\"num\">' + a.abiertos + '</td>' +\n      '<td class=\"num grupo-izq\">' + num(r.totalReplies) + '</td><td class=\"num\">' + num(r.totalConversations) + '</td><td class=\"num\">' + num(r.customersHelped) + '</td><td class=\"num\">' + num(r.resolved) + '</td><td class=\"num\">' + num(r.closed) + '</td>' +\n      '<td class=\"num\">' + corto(r.responseTime) + '</td><td class=\"num\">' + corto(r.resolutionTime) + '</td>' +\n      '<td class=\"num grupo-izq\">' + (a.ultimaRespuesta ? 'hace <span class=\"reloj\" data-desde=\"' + esc(a.ultimaRespuesta) + '\" data-corto=\"1\">' + corto((ahora() - Date.parse(a.ultimaRespuesta)) / 1000) + '</span>' : '<span class=\"tenue\">sin respuestas hoy</span>') + '</td>' +\n      '<td class=\"num\"><button type=\"button\" class=\"btn chico\" data-detalle=\"' + a.id + '\">Detalle</button></td></tr>';\n  }\n  function marcar() { todos('.t-agentes tbody tr[data-id]').forEach(function (tr) { tr.classList.toggle('sel', tr.getAttribute('data-id') === String(filtro)); }); }\n\n  function pintarCola() {\n    var p = E.panel, filas = [];\n    p.agentes.forEach(function (a) { a.esperando.forEach(function (t) { filas.push(t); }); });\n    p.sinAsignar.forEach(function (t) { filas.push(t); });\n    var pest = [{ id: 'todos', t: 'Todos', n: filas.length }]\n      .concat(p.agentes.filter(function (a) { return a.vinculado; }).map(function (a) { return { id: String(a.id), t: a.nombre, n: a.esperando.length }; }))\n      .concat(E.cfg.mostrarSinAsignar ? [{ id: 'sin', t: 'Sin asignar', n: p.sinAsignar.length }] : []);\n    if (!pest.some(function (x) { return x.id === String(filtro); })) filtro = 'todos';\n    var visibles = filas.filter(function (t) {\n      return filtro === 'todos' || (filtro === 'sin' ? !t.agenteId : String(t.agenteId) === String(filtro));\n    }).sort(function (x, y) { return x.esperaDesde < y.esperaDesde ? -1 : x.esperaDesde > y.esperaDesde ? 1 : 0; });\n    var h = '<div class=\"pestanas\" role=\"tablist\">' + pest.map(function (x) {\n      var sel = String(filtro) === x.id;\n      return '<button type=\"button\" role=\"tab\" aria-selected=\"' + sel + '\" class=\"pest' + (sel ? ' sel' : '') + '\" data-f=\"' + x.id + '\">' + esc(x.t) + '<span>' + x.n + '</span></button>';\n    }).join('') + '</div>';\n    if (!visibles.length) h += '<div class=\"vacio\">Ningún cliente está esperando respuesta.</div>';\n    else {\n      h += '<div class=\"desliza\"><table class=\"t-cola\"><thead><tr><th>Espera</th><th>Caso</th><th>Asunto</th><th>Cliente</th><th>Agente</th><th>Estado en Help Scout</th></tr></thead><tbody>' +\n        visibles.map(function (t) {\n          return '<tr><td>' + reloj(t.esperaDesde, 'espera', ' data-tono=\"1\" data-barra=\"1\"') + '<span class=\"barra\"><i></i></span></td>' +\n            '<td><a href=\"' + esc(t.url) + '\" target=\"_blank\" rel=\"noopener\"><b>#' + esc(t.numero) + '</b></a></td>' +\n            '<td class=\"asunto\" title=\"' + esc(t.asunto) + '\">' + esc(t.asunto) + '</td><td class=\"tenue\">' + esc(t.cliente || '—') + '</td>' +\n            '<td>' + (t.agenteId ? esc(t.agente) : '<span class=\"bad\">Sin asignar</span>') + '</td>' +\n            '<td class=\"tenue\">' + (t.estado === 'pending' ? 'Pending' : 'Active') + (t.buzon ? ' · ' + esc(t.buzon) : '') + '</td></tr>';\n        }).join('') + '</tbody></table></div>';\n    }\n    $('cola').innerHTML = h;\n    todos('.pest').forEach(function (b) { b.addEventListener('click', function () { filtro = b.getAttribute('data-f'); marcar(); pintarCola(); }); });\n    tic();\n  }\n\n  var TIPOS = { RESPUESTA: ['Respuesta', 'ok'], CLIENTE: ['Cliente', 'warn'], ASIGNADO: ['Asignado', ''], CERRADO: ['Cerrado', 'ok'] };\n  function textoMovimiento(f) {\n    var caso = '<a href=\"' + esc(f.url) + '\" target=\"_blank\" rel=\"noopener\"><b>#' + esc(f.numero) + '</b></a>', ag = esc(f.agente || '');\n    if (f.tipo === 'RESPUESTA') return ag + ' respondió ' + caso;\n    if (f.tipo === 'CLIENTE') return 'El cliente escribió en ' + caso + (ag ? ' <span class=\"tenue\">· ' + ag + '</span>' : ' <span class=\"bad\">· sin asignar</span>');\n    if (f.tipo === 'ASIGNADO') return caso + ' asignado a ' + ag;\n    return ag + ' cerró ' + caso;\n  }\n  function registro(items) {\n    if (!items.length) return '<div class=\"vacio\">Todavía no hay movimientos hoy.</div>';\n    return '<ol class=\"registro\">' + items.map(function (f) {\n      var t = TIPOS[f.tipo];\n      return '<li><time>' + esc(hora(Date.parse(f.fecha), false)) + '</time><span class=\"tipo ' + t[1] + '\">' + esc(t[0]) + '</span>' +\n        '<span class=\"txt\">' + textoMovimiento(f) + '<small>' + esc(f.asunto || '') + '</small></span></li>';\n    }).join('') + '</ol>';\n  }\n\n  // ---------- Cada segundo ----------\n  function conexion(clase, texto) { var el = $('conexion'); el.className = 'estado-con ' + clase; el.lastElementChild.textContent = texto; }\n  function tic() {\n    var t = ahora();\n    $('reloj').textContent = hora(t, true);\n    if (!E.cfg || !ultimaOk) { conexion(errorActual ? 'bad' : 'tenue', errorActual ? 'Sin conexión' : 'Conectando'); return; }\n    var hace = Math.max(0, Math.floor((Date.now() - ultimaOk) / 1000));\n    var atrasado = !E.cargandoBase && hace > Math.max(45, intervalo() * 6);\n    $('actualizado').textContent = pausado ? 'En pausa · datos de hace ' + corto(hace) : 'Actualizado hace ' + corto(hace) + ' · cada ' + intervalo() + ' s';\n    if (pausado) conexion('warn', 'En pausa');\n    else if (errorActual || atrasado) conexion('bad', 'Sin conexión');\n    else if (!E.enHorario) conexion('tenue', 'Fuera de horario');\n    else conexion('ok', 'En vivo');\n    $('avance').style.width = pausado ? '0' : Math.min(100, Math.max(0, 100 - (proxima - Date.now()) / (intervalo() * 1000) * 100)) + '%';\n\n    var meta = E.cfg.metaRespuestaMin;\n    todos('.reloj[data-desde]').forEach(function (el) {\n      var seg = (t - Date.parse(el.getAttribute('data-desde'))) / 1000;\n      el.textContent = el.getAttribute('data-corto') ? corto(seg) : dur(seg);\n      if (el.getAttribute('data-tono')) {\n        var c = tono(seg / 60);\n        el.classList.remove('ok', 'warn', 'bad'); el.classList.add(c);\n        if (el.getAttribute('data-barra')) {\n          var b = el.parentNode.querySelector('.barra');\n          b.className = 'barra ' + c;\n          b.firstChild.style.width = Math.min(100, seg / 60 / meta * 100) + '%';\n        }\n      }\n    });\n    var alerta = E.cfg.alertaSinResponderMin;\n    todos('.est[data-esperando]').forEach(function (el) {\n      var esperando = Number(el.getAttribute('data-esperando')), ultima = el.getAttribute('data-ultima');\n      var min = ultima ? (t - Date.parse(ultima)) / 60000 : Infinity, clase, texto;\n      if (!esperando) { clase = 'ok'; texto = 'Al día'; }\n      else if (!E.enHorario) { clase = 'tenue'; texto = 'Fuera de horario'; }\n      else if (min < alerta[0]) { clase = 'ok'; texto = 'Respondiendo'; }\n      else if (min < alerta[1]) { clase = 'warn'; texto = 'Sin responder ' + Math.floor(min) + ' min'; }\n      else { clase = 'bad'; texto = ultima ? 'Sin responder ' + corto(min * 60) : 'Sin responder hoy'; }\n      el.className = 'est ' + clase;\n      el.lastElementChild.textContent = texto;\n    });\n  }\n\n  // ---------- Detalle de una agente ----------\n  function abrirDetalle(id) {\n    var a = E.panel.agentes.filter(function (x) { return x.id === id; })[0];\n    if (!a) return;\n    var r = rep(id);\n    var movs = [];\n    Object.keys(E.convs).forEach(function (k) {\n      var c = E.convs[k];\n      c.mv.forEach(function (m) {\n        if (m[0] !== 'C' && m[1] === id) movs.push({ fecha: m[2], tipo: { R: 'RESPUESTA', X: 'CERRADO', A: 'ASIGNADO' }[m[0]], numero: c.n, asunto: c.s, url: 'https://secure.helpscout.net/conversation/' + c.id + '/' + c.n });\n      });\n    });\n    movs.sort(function (x, y) { return x.fecha < y.fecha ? 1 : -1; });\n    $('tituloDetalle').textContent = a.nombre;\n    $('subDetalle').textContent = 'Casos y movimientos de hoy, con enlace a Help Scout para comprobarlos.';\n    var caja = function (v, l) { return '<div><b>' + v + '</b><span>' + l + '</span></div>'; };\n    var h = '<div class=\"resumen-dlg\">' + caja(a.esperando.length, 'Esperando') + caja(a.seguimiento, 'En seguimiento') + caja(a.activos, 'Active') + caja(a.pendientes, 'Pending') +\n      caja(a.respuestasVistas, 'Respuestas vistas hoy') + caja(r ? num(r.totalReplies) : '—', 'Respuestas según Reports') + '</div>' +\n      '<p class=\"fuente\">\"Respuestas vistas\" es el conteo directo de mensajes enviados hoy en los casos leídos; \"según Reports\" es la cifra oficial de Help Scout, que puede tardar unos minutos en actualizarse.</p>';\n    var filaCaso = function (x) {\n      return '<tr><td><a href=\"' + esc(x.url) + '\" target=\"_blank\" rel=\"noopener\"><b>#' + esc(x.numero) + '</b></a></td><td class=\"asunto\">' + esc(x.asunto) + '</td><td class=\"tenue\">' + esc(x.cliente) +\n        '</td><td class=\"tenue\">' + (x.estado === 'pending' ? 'Pending' : 'Active') + '</td><td>' + (x.esperaDesde ? esc(hora(Date.parse(x.esperaDesde), true)) + ' · ' + corto((ahora() - Date.parse(x.esperaDesde)) / 1000) : '<span class=\"tenue\">respondido, espera al cliente</span>') + '</td></tr>';\n    };\n    var abiertos = a.esperando.concat(a.enSeguimiento);\n    h += '<div class=\"previa\"><h4>Casos abiertos (' + abiertos.length + ')</h4><div class=\"caja\"><div class=\"desliza\"><table><thead><tr><th>Caso</th><th>Asunto</th><th>Cliente</th><th>Estado</th><th>Cliente espera desde</th></tr></thead><tbody>' +\n      (abiertos.map(filaCaso).join('') || '<tr><td colspan=\"5\" class=\"vacio\">Sin casos abiertos.</td></tr>') + '</tbody></table></div></div></div>';\n    h += '<div class=\"previa\"><h4>Movimientos de hoy (' + movs.length + ')</h4><div class=\"caja\"><div class=\"desliza\"><table><thead><tr><th>Hora</th><th>Movimiento</th><th>Caso</th><th>Asunto</th></tr></thead><tbody>' +\n      (movs.map(function (m) {\n        var t = TIPOS[m.tipo];\n        return '<tr><td>' + esc(hora(Date.parse(m.fecha), true)) + '</td><td class=\"' + t[1] + '\">' + esc(t[0]) + '</td><td><a href=\"' + esc(m.url) + '\" target=\"_blank\" rel=\"noopener\"><b>#' + esc(m.numero) + '</b></a></td><td class=\"asunto\">' + esc(m.asunto) + '</td></tr>';\n      }).join('') || '<tr><td colspan=\"4\" class=\"vacio\">Sin movimientos hoy.</td></tr>') + '</tbody></table></div></div></div>';\n    $('cuerpoDetalle').innerHTML = h;\n    $('dlgDetalle').showModal();\n  }\n\n  // ---------- Exportar ----------\n  function sumarDias(d, n) { var f = new Date(d + 'T12:00:00Z'); f.setUTCDate(f.getUTCDate() + n); return f.toISOString().slice(0, 10); }\n  function rango(tipo) {\n    var hoy = diaLocal(ahora()), f = new Date(hoy + 'T12:00:00Z'), lunes = sumarDias(hoy, -((f.getUTCDay() + 6) % 7)), mes1 = hoy.slice(0, 8) + '01';\n    if (tipo === 'hoy') return [hoy, hoy];\n    if (tipo === 'ayer') return [sumarDias(hoy, -1), sumarDias(hoy, -1)];\n    if (tipo === 'semana') return [lunes, hoy];\n    if (tipo === 'semanaPasada') return [sumarDias(lunes, -7), sumarDias(lunes, -1)];\n    if (tipo === 'mes') return [mes1, hoy];\n    if (tipo === 'mesPasado') { var fin = sumarDias(mes1, -1); return [fin.slice(0, 8) + '01', fin]; }\n    if (tipo === '90') return [sumarDias(hoy, -89), hoy];\n    return null;\n  }\n  function aplicarPeriodo() { var r = rango($('expPeriodo').value); if (r) { $('expDesde').value = r[0]; $('expHasta').value = r[1]; } }\n  function abrirExportar() {\n    if (!E.cfg) return;\n    if (!$('expAgentes').children.length) {\n      $('expAgentes').innerHTML = E.agentes.filter(function (a) { return a.id; }).map(function (a) {\n        return '<label><input type=\"checkbox\" value=\"' + a.id + '\" checked> ' + esc(a.nombre) + '</label>';\n      }).join('');\n      $('expOficina').checked = !!E.cfg.horarioDeOficina;\n      aplicarPeriodo();\n    }\n    $('expPrevia').innerHTML = ''; $('expEstado').textContent = ''; exportacion = null;\n    $('dlgExportar').showModal();\n  }\n  function botones(activos) { ['expVer', 'expExcel', 'expCsv'].forEach(function (id) { $(id).disabled = !activos; }); }\n  function pedirExportacion(conCasos, despues) {\n    var f = {\n      desde: $('expDesde').value, hasta: $('expHasta').value, oficina: $('expOficina').checked,\n      agentes: todos('#expAgentes input:checked').map(function (i) { return Number(i.value); }),\n      series: $('expSeries').checked, casos: conCasos && $('expCasos').checked,\n    };\n    if (!f.desde || !f.hasta || f.desde > f.hasta) { $('expEstado').textContent = 'Revisa las fechas.'; return; }\n    if (!f.agentes.length) { $('expEstado').textContent = 'Elige al menos una agente.'; return; }\n    var qs = '?desde=' + f.desde + '&hasta=' + f.hasta + '&agentes=' + f.agentes.join(',') + '&oficina=' + (f.oficina ? 1 : 0);\n    var x = { filtros: f, resumen: null, series: null, casos: null, generado: Date.now() };\n    botones(false);\n    $('expEstado').textContent = 'Consultando los reportes de Help Scout.';\n    api('/api/reporte' + qs).then(function (r) {\n      if (!r.disponible) throw new Error(r.motivo);\n      x.resumen = r;\n      if (!f.series) return null;\n      $('expEstado').textContent = 'Leyendo la evolución por periodo.';\n      return api('/api/reporte-dias' + qs).then(function (s) { x.series = s; });\n    }).then(function () {\n      if (!f.casos) return null;\n      x.casos = [];\n      return f.agentes.reduce(function (cadena, id) {\n        return cadena.then(function () {\n          var leer = function (pagina) {\n            return api('/api/reporte-casos' + qs + '&agente=' + id + '&pagina=' + pagina).then(function (c) {\n              c.filas.forEach(function (fila) { fila.agente = c.nombre; x.casos.push(fila); });\n              $('expEstado').textContent = 'Leyendo conversaciones de ' + c.nombre + ' (' + x.casos.length + ').';\n              return c.siguiente ? leer(c.siguiente) : null;\n            });\n          };\n          return leer(1);\n        });\n      }, Promise.resolve());\n    }).then(function () {\n      exportacion = x;\n      $('expEstado').textContent = 'Listo.';\n      pintarPrevia();\n      if (despues) despues();\n    }).catch(function (e) {\n      $('expEstado').textContent = '';\n      $('expPrevia').innerHTML = '<div class=\"aviso error\">' + esc(e.message) + '</div>';\n    }).then(function () { botones(true); });\n  }\n  var fraccion = function (v) { return v == null ? null : (v > 1 ? v / 100 : v); };\n  var pct = function (v) { v = fraccion(v); return v == null ? '—' : Math.round(v * 100) + '%'; };\n  function total(filas, campo) { return filas.reduce(function (s, f) { return s + (f[campo] || 0); }, 0); }\n  function pintarPrevia() {\n    var r = exportacion.resumen;\n    var fila = function (f) {\n      return '<tr><td class=\"nombre\">' + esc(f.nombre) + '</td><td class=\"num\">' + num(f.totalConversations) + '</td><td class=\"num\">' + num(f.customersHelped) + '</td><td class=\"num\">' + num(f.totalReplies) +\n        '</td><td class=\"num\">' + num(f.repliesPerDay) + '</td><td class=\"num\">' + num(f.resolved) + '</td><td class=\"num\">' + pct(f.percentResolvedOnFirstReply) + '</td><td class=\"num\">' + num(f.closed) +\n        '</td><td class=\"num\">' + corto(f.responseTime) + '</td><td class=\"num\">' + corto(f.resolutionTime) + '</td><td class=\"num\">' + corto(f.handleTime) + '</td><td class=\"num\">' + num(f.happinessScore) + '</td></tr>';\n    };\n    $('expPrevia').innerHTML = '<div class=\"previa\"><h4>Resumen por agente · ' + esc(r.rango.desde) + ' a ' + esc(r.rango.hasta) + '</h4><div class=\"caja\"><div class=\"desliza\"><table><thead><tr>' +\n      '<th>Agente</th><th class=\"num\">Conversaciones</th><th class=\"num\">Clientes</th><th class=\"num\">Respuestas</th><th class=\"num\">Resp. por día</th><th class=\"num\">Resueltos</th><th class=\"num\">% en 1ª resp.</th><th class=\"num\">Cerrados</th>' +\n      '<th class=\"num\">T. respuesta</th><th class=\"num\">T. resolución</th><th class=\"num\">T. gestión</th><th class=\"num\">Felicidad</th></tr></thead><tbody>' + r.filas.map(fila).join('') + '</tbody><tfoot><tr><td>Suma</td>' +\n      '<td class=\"num\">' + num(total(r.filas, 'totalConversations')) + '</td><td class=\"num\">' + num(total(r.filas, 'customersHelped')) + '</td><td class=\"num\">' + num(total(r.filas, 'totalReplies')) + '</td><td></td><td class=\"num\">' + num(total(r.filas, 'resolved')) +\n      '</td><td></td><td class=\"num\">' + num(total(r.filas, 'closed')) + '</td><td colspan=\"4\"></td></tr></tfoot></table></div></div>' +\n      '<p class=\"fuente\" style=\"margin-top:10px\">Fuente: Reports de Help Scout, del ' + esc(r.rango.desde) + ' 00:00 al ' + esc(r.rango.hasta) + ' 23:59 (' + esc(tz()) + '). Una conversación atendida por dos agentes cuenta para cada una, por eso la suma puede ser mayor que el total del equipo.</p></div>';\n  }\n\n  var DIAS_SEMANA = ['', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'domingo'];\n  function hojas() {\n    var x = exportacion, r = x.resumen, v = function (n) { return n == null ? '' : n; };\n    var min = function (s) { return s == null ? '' : Math.round(s / 6) / 10; }, hrs = function (s) { return s == null ? '' : Math.round(s / 360) / 10; };\n    var resumen = [['Agente', 'Días del periodo', 'Conversaciones', 'Conversaciones creadas', 'Clientes ayudados', 'Respuestas enviadas', 'Respuestas por día', 'Conversaciones por día',\n      'Resueltos', 'Resueltos en la 1ª respuesta', '% resueltos en la 1ª respuesta', 'Respuestas para resolver', 'Cerrados', 'T. respuesta (min)', 'T. resolución (h)', 'T. gestión (min)',\n      'Felicidad', 'Día más ocupado', 'T. respuesta (s)', 'T. resolución (s)', 'T. gestión (s)']]\n      .concat(r.filas.map(function (f) {\n        return [f.nombre, v(f.totalDays), v(f.totalConversations), v(f.conversationsCreated), v(f.customersHelped), v(f.totalReplies), v(f.repliesPerDay), v(f.conversationsPerDay), v(f.resolved),\n          v(f.resolvedOnFirstReply), v(fraccion(f.percentResolvedOnFirstReply)), v(f.repliesToResolve), v(f.closed), min(f.responseTime), hrs(f.resolutionTime), min(f.handleTime), v(f.happinessScore),\n          DIAS_SEMANA[f.busiestDay] || '', v(f.responseTime), v(f.resolutionTime), v(f.handleTime)];\n      }));\n    var etiqueta = { day: 'Día', week: 'Semana (inicio)', month: 'Mes (inicio)' }[(x.series && x.series.vista) || 'day'];\n    var series = [[etiqueta, 'Agente', 'Respuestas enviadas', 'Resueltos', 'Clientes ayudados']]\n      .concat(((x.series && x.series.filas) || []).map(function (f) { return [f.fecha, f.nombre, f.respuestas, f.resueltos, f.clientes]; }));\n    var casos = [['Agente', '# Caso', 'Cliente', 'Estado', 'Respuestas enviadas', '1ª respuesta (min)', 'T. respuesta (min)', 'T. resolución (h)', 'T. gestión (min)', 'Enlace']]\n      .concat((x.casos || []).map(function (c) { return [c.agente, c.numero, c.cliente, c.estado, v(c.respuestas), min(c.primeraRespuesta), min(c.respuesta), hrs(c.resolucion), min(c.gestion), c.url]; }));\n    var nombres = E.agentes.filter(function (a) { return x.filtros.agentes.indexOf(a.id) >= 0; }).map(function (a) { return a.nombre; });\n    var notas = [['Métricas de soporte — Help Scout'], [],\n      ['Periodo', r.rango.desde + ' 00:00 a ' + r.rango.hasta + ' 23:59 (' + tz() + ')'], ['Agentes', nombres.join(', ')],\n      ['Tiempos en horario de oficina', x.filtros.oficina ? 'Sí (si está activado en Help Scout)' : 'No: tiempo corrido'],\n      ['Generado', new Date(x.generado).toLocaleString('es', { timeZone: tz() }) + ' (' + tz() + ')'], [],\n      ['Fuente', 'Todas las cifras son las de los reportes oficiales de Help Scout (sección Reports → Team → usuario), sin recálculo.'],\n      ['Conversaciones', 'Conversaciones en las que el agente participó en el periodo (totalConversations).'],\n      ['Clientes ayudados', 'Clientes distintos a los que el agente respondió (customersHelped).'],\n      ['Respuestas enviadas', 'Mensajes enviados a clientes (totalReplies). No cuentan las notas internas.'],\n      ['Resueltos', 'Conversaciones resueltas por el agente (resolved). Help Scout cuenta una conversación como resuelta cuando se cierra y no se reabre.'],\n      ['Cerrados', 'Veces que el agente cerró una conversación (closed).'],\n      ['T. respuesta', 'Tiempo promedio de respuesta (responseTime). Help Scout lo entrega en segundos; aquí se muestra en minutos y también en segundos.'],\n      ['T. resolución', 'Tiempo promedio hasta resolver (resolutionTime), en horas y en segundos.'],\n      ['T. gestión', 'Tiempo promedio de gestión de cada respuesta (handleTime). Help Scout no documenta la unidad; se asume segundos.'],\n      ['Felicidad', 'Happiness score de Help Scout: % de calificaciones \"Great\" menos % de \"Not Good\".'],\n      ['Sumas', 'Una conversación atendida por dos agentes cuenta para cada una: la suma de agentes puede superar el total del equipo.'],\n      ['Evolución', 'Help Scout entrega la serie por día hasta 60 días, por semana hasta 1 año y por mes para rangos mayores.']];\n    return { resumen: resumen, series: series, casos: casos, notas: notas };\n  }\n  function nombreArchivo(ext, sufijo) { var f = exportacion.filtros; return 'metricas-soporte_' + f.desde + '_a_' + f.hasta + (sufijo ? '_' + sufijo : '') + '.' + ext; }\n  function bajar(blob, nombre) {\n    var a = document.createElement('a');\n    a.href = URL.createObjectURL(blob); a.download = nombre; document.body.appendChild(a); a.click();\n    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 2000);\n  }\n  function cargarXlsx(listo) {\n    if (window.XLSX) return listo(true);\n    var s = document.createElement('script');\n    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';\n    s.onload = function () { listo(!!window.XLSX); };\n    s.onerror = function () { listo(false); };\n    document.head.appendChild(s);\n  }\n  function descargarExcel() {\n    cargarXlsx(function (ok) {\n      if (!ok) { $('expEstado').textContent = 'No se pudo cargar el generador de Excel. Usa la descarga en CSV.'; return; }\n      var h = hojas(), libro = XLSX.utils.book_new();\n      var agregar = function (nombre, filas, anchos, columnasPct) {\n        var hoja = XLSX.utils.aoa_to_sheet(filas);\n        hoja['!cols'] = filas[0].map(function (t, i) { return { wch: (anchos && anchos[i]) || Math.max(12, Math.min(32, String(t).length + 2)) }; });\n        (columnasPct || []).forEach(function (col) {\n          for (var f = 1; f < filas.length; f++) { var celda = hoja[XLSX.utils.encode_cell({ r: f, c: col })]; if (celda && typeof celda.v === 'number') celda.z = '0%'; }\n        });\n        if (filas.length > 1) hoja['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: filas.length - 1, c: filas[0].length - 1 } }) };\n        XLSX.utils.book_append_sheet(libro, hoja, nombre);\n      };\n      agregar('Resumen por agente', h.resumen, { 0: 24 }, [10]);\n      if (exportacion.series) agregar('Evolución', h.series, { 0: 16, 1: 24 });\n      if (exportacion.casos) agregar('Conversaciones', h.casos, { 0: 24, 2: 28, 9: 58 });\n      var notas = XLSX.utils.aoa_to_sheet(h.notas);\n      notas['!cols'] = [{ wch: 32 }, { wch: 120 }];\n      XLSX.utils.book_append_sheet(libro, notas, 'Notas');\n      bajar(new Blob([XLSX.write(libro, { bookType: 'xlsx', type: 'array' })], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), nombreArchivo('xlsx'));\n      $('expEstado').textContent = 'Excel descargado.';\n    });\n  }\n  function descargarCsv() {\n    var cual = $('expCsvHoja').value;\n    if ((cual === 'series' && !exportacion.series) || (cual === 'casos' && !exportacion.casos)) { $('expEstado').textContent = 'Marca esa opción en \"Contenido del archivo\" para incluirla.'; return; }\n    var texto = hojas()[cual].map(function (f) {\n      return f.map(function (c) { var s = String(c == null ? '' : c); return /[\",\\n;]/.test(s) ? '\"' + s.replace(/\"/g, '\"\"') + '\"' : s; }).join(',');\n    }).join('\\r\\n');\n    bajar(new Blob(['﻿' + texto], { type: 'text/csv;charset=utf-8' }), nombreArchivo('csv', cual));\n    $('expEstado').textContent = 'CSV descargado.';\n  }\n\n  // ---------- Controles ----------\n  $('btnPausa').addEventListener('click', function () {\n    pausado = !pausado;\n    this.setAttribute('aria-pressed', pausado ? 'true' : 'false');\n    this.textContent = pausado ? 'Reanudar' : 'Pausar';\n    if (pausado) clearTimeout(temporizador); else ciclo();\n    tic();\n  });\n  $('btnExportar').addEventListener('click', abrirExportar);\n  $('expPeriodo').addEventListener('change', aplicarPeriodo);\n  ['expDesde', 'expHasta'].forEach(function (id) { $(id).addEventListener('change', function () { $('expPeriodo').value = 'personal'; }); });\n  $('expVer').addEventListener('click', function () { pedirExportacion(false); });\n  $('expExcel').addEventListener('click', function () { pedirExportacion(true, descargarExcel); });\n  $('expCsv').addEventListener('click', function () { pedirExportacion(true, descargarCsv); });\n  todos('[data-cerrar]').forEach(function (b) { b.addEventListener('click', function () { b.closest('dialog').close(); }); });\n  todos('dialog').forEach(function (d) { d.addEventListener('click', function (ev) { if (ev.target === d) d.close(); }); });\n  document.addEventListener('visibilitychange', function () {\n    if (!document.hidden && !pausado && E.cfg && Date.now() - ultimaOk > intervalo() * 1000) ciclo();\n  });\n\n  setInterval(tic, 1000);\n  if (DEMO) {\n    var s = document.createElement('script');\n    s.src = 'demo.js';\n    s.onload = arrancar;\n    document.head.appendChild(s);\n  } else {\n    arrancar();\n  }\n})();\n</script>\n</body>\n</html>\n";

@@ -42,7 +42,6 @@ function sincronizar_() {
     tagsReasignacion: CONFIG.TAGS_REASIGNACION,
     transferenciaInternaEsReasignacion: CONFIG.TRANSFERENCIA_INTERNA_ES_REASIGNACION,
     fechaInicio: CONFIG.FECHA_INICIO,
-    incluirRespuestas: true, // cada respuesta queda en HS_Eventos (para el panel y la exportación)
     minutos: (fin, inicio) => minutosGestion(relojLocal_(inicio, tz), relojLocal_(fin, tz), CONFIG.HORARIO_LABORAL),
   };
 
